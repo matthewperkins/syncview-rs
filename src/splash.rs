@@ -164,7 +164,7 @@ impl Splash {
     pub fn new(ctx: &egui::Context, cache_root: PathBuf, trigger_line: i64, stream: Option<String>) -> Self {
         let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG).expect("built-in icon");
         let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-        let icon = ctx.load_texture("syncviewr-icon", img, egui::TextureOptions::LINEAR);
+        let icon = ctx.load_texture("syncview-icon", img, egui::TextureOptions::LINEAR);
         Self {
             cache_root,
             trigger_line,
@@ -299,7 +299,7 @@ impl Splash {
             match r {
                 Ok(f) => {
                     let img = egui::ColorImage::from_rgb([f.width, f.height], &f.rgb);
-                    t.tex = Some(ctx.load_texture("syncviewr-thumb", img, egui::TextureOptions::LINEAR));
+                    t.tex = Some(ctx.load_texture("syncview-thumb", img, egui::TextureOptions::LINEAR));
                 }
                 Err(e) => t.error = Some(e),
             }
@@ -370,7 +370,7 @@ impl Splash {
                 ui.add_space(((ui.available_height() - 600.0) / 2.0).max(16.0));
                 ui.add(egui::Image::new(&self.icon).fit_to_exact_size(egui::vec2(112.0, 112.0)));
                 ui.add_space(6.0);
-                ui.label(RichText::new("syncviewR").size(30.0).color(LABEL));
+                ui.label(RichText::new("syncview").size(30.0).color(LABEL));
                 ui.label(RichText::new("Open Ephys recordings, frame-locked to behaviour video").color(MUTED));
                 ui.add_space(22.0);
 
@@ -500,7 +500,7 @@ impl Splash {
             .fill(WARN_FILL)
             .stroke(egui::Stroke::new(1.0, WARN_TEXT.gamma_multiply(0.6)))
             .inner_margin(18.0);
-        let m = egui::Modal::new(egui::Id::new("syncviewr-sync-warning")).frame(frame).show(ctx, |ui| {
+        let m = egui::Modal::new(egui::Id::new("syncview-sync-warning")).frame(frame).show(ctx, |ui| {
             ui.set_width(560f32.min(ctx.content_rect().width() - 80.0));
             ui.label(RichText::new("⚠  The video and the recording may not line up").size(17.0).color(WARN_TEXT));
             ui.add_space(10.0);
@@ -565,7 +565,7 @@ impl Splash {
             Pick::Recording => format!("{n} recordings: which one?"),
             Pick::Video => format!("{} videos: which one goes with this recording?", n - 1),
         };
-        let modal = egui::Modal::new(egui::Id::new("syncviewr-picker")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("syncview-picker")).show(ctx, |ui| {
             ui.set_width(760f32.min(ctx.content_rect().width() - 80.0));
             ui.label(RichText::new(title).size(17.0).color(LABEL));
             ui.label(RichText::new("Up / Down arrows to move, Enter to open, Esc to cancel; or double-click").color(MUTED));
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn pick_recording_then_video_with_keys() {
-        let dir = std::env::temp_dir().join(format!("syncviewr_splash_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("syncview_splash_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         session(&dir);
         let ctx = egui::Context::default();

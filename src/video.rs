@@ -4,7 +4,7 @@
 //! no decoding), so indexing stays frame-exact even when timestamps jitter. The sorted timestamps
 //! are cached as `<cache>/video_index/<stem>.<hash>.npy`, the same file Python syncview writes.
 //!
-//! Decoding is in software unless `SYNCVIEWR_HWDEC=<FFmpeg device type>` (videotoolbox, vaapi,
+//! Decoding is in software unless `SYNCVIEW_RS_HWDEC=<FFmpeg device type>` (videotoolbox, vaapi,
 //! cuda, d3d11va, …) asks for a hardware decoder and FFmpeg was built with it; it falls back to
 //! software if that decoder can't handle the video or fails. Software is the default because it
 //! was faster: on an M4, 1280×600 HEVC jumps took 41 ms in software and 79 ms with VideoToolbox
@@ -53,7 +53,7 @@ pub fn frame_pts(path: &Path, index_dir: &Path) -> Result<Vec<i64>> {
         Ok(())
     };
     if let Err(e) = save() {
-        eprintln!("syncviewr: could not save the video index to {}: {e:#}", file.display());
+        eprintln!("syncview: could not save the video index to {}: {e:#}", file.display());
     }
     Ok(pts)
 }
@@ -81,13 +81,13 @@ pub fn video_duration(path: &Path) -> Option<f64> {
 /// The hardware device type to try, if any (see the module docs).
 fn hw_device_type() -> Option<ff::ffi::AVHWDeviceType> {
     use ff::ffi::AVHWDeviceType::*;
-    match std::env::var("SYNCVIEWR_HWDEC").ok().as_deref().map(str::trim) {
+    match std::env::var("SYNCVIEW_RS_HWDEC").ok().as_deref().map(str::trim) {
         Some("" | "0" | "off" | "no" | "none" | "software") => None,
         Some(name) => {
             let c = CString::new(name).ok()?;
             let t = unsafe { ff::ffi::av_hwdevice_find_type_by_name(c.as_ptr()) };
             if t == AV_HWDEVICE_TYPE_NONE {
-                eprintln!("syncviewr: SYNCVIEWR_HWDEC={name}: FFmpeg has no such device type; decoding in software");
+                eprintln!("syncview: SYNCVIEW_RS_HWDEC={name}: FFmpeg has no such device type; decoding in software");
                 return None;
             }
             Some(t)
@@ -187,7 +187,7 @@ impl Decoder {
             Ok(Some(d)) => Ok(d),
             Ok(None) => Ok(sw),
             Err(e) => {
-                eprintln!("syncviewr: not using the hardware decoder: {e:#}; decoding in software");
+                eprintln!("syncview: not using the hardware decoder: {e:#}; decoding in software");
                 Ok(sw)
             }
         }
@@ -446,7 +446,7 @@ impl VideoDecoder {
                         let mut res = decode_to(&mut dec, k, gop, &mut next, keep);
                         if let (Err(e), Some(_)) = (&res, &dec.hw) {
                             // e.g. the hardware session lost across sleep: carry on in software
-                            eprintln!("syncviewr: {e:#}; switching to software decoding");
+                            eprintln!("syncview: {e:#}; switching to software decoding");
                             next = None;
                             res = Decoder::open_with(&p, dec.pts.clone(), None).and_then(|d| {
                                 dec = d;
@@ -468,7 +468,7 @@ impl VideoDecoder {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("syncviewr: video decode error at frame {k}: {e:#}");
+                                eprintln!("syncview: video decode error at frame {k}: {e:#}");
                                 next = None;
                             }
                         }
@@ -551,7 +551,7 @@ impl FrameReader {
 /// (`<dir>/<index>.rgb`, plus `<dir>/size.txt`).
 pub fn dump_frames(path: &Path, indexes: &[usize], dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    let pts = frame_pts(path, &std::env::temp_dir().join("syncviewr_test_index"))?;
+    let pts = frame_pts(path, &std::env::temp_dir().join("syncview_test_index"))?;
     let gop = keyframe_interval(path).unwrap_or(1);
     let mut dec = Decoder::open(path, pts)?;
     for &k in indexes {
@@ -573,7 +573,7 @@ pub fn dump_frames(path: &Path, indexes: &[usize], dir: &Path) -> Result<()> {
 /// conversion to RGB the viewer does.
 pub fn bench(path: &Path) -> Result<()> {
     use std::time::Instant;
-    let pts = frame_pts(path, &std::env::temp_dir().join("syncviewr_test_index"))?;
+    let pts = frame_pts(path, &std::env::temp_dir().join("syncview_test_index"))?;
     let n = pts.len();
     let gop = keyframe_interval(path);
     println!(

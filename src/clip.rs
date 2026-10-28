@@ -336,8 +336,8 @@ impl Encoder {
     /// H.264 where this FFmpeg has an encoder for it that opens (x264 in system builds, Apple's
     /// encoder on macOS), otherwise FFmpeg's own MPEG-4 encoder at high quality.
     fn open(path: &Path, w: u32, h: u32, fps: f64) -> Result<Self> {
-        // (testing: SYNCVIEWR_CLIP_CODEC=mpeg4 forces an encoder)
-        let forced = std::env::var("SYNCVIEWR_CLIP_CODEC").ok();
+        // (testing: SYNCVIEW_RS_CLIP_CODEC=mpeg4 forces an encoder)
+        let forced = std::env::var("SYNCVIEW_RS_CLIP_CODEC").ok();
         let order: Vec<&str> = match &forced {
             Some(c) => vec![c.as_str()],
             None => vec!["libx264", "h264_videotoolbox", "mpeg4"],

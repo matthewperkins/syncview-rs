@@ -1,7 +1,7 @@
-# Build syncviewR for macOS (Apple silicon) and Windows (x64), with FFmpeg compiled in.
+# Build syncview for macOS (Apple silicon) and Windows (x64), with FFmpeg compiled in.
 #
 # - Push a tag like v0.1.3: builds both, creates the GitHub release if it doesn't exist, and
-#   attaches syncviewr-macos-arm64.zip and syncviewr-windows-x64.zip.
+#   attaches syncview-macos-arm64.zip and syncview-windows-x64.zip.
 # - Actions tab -> "Release binaries" -> Run workflow: builds both and keeps the zips as
 #   workflow artifacts (no release), for testing.
 name: Release binaries
@@ -21,9 +21,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            asset: syncviewr-macos-arm64.zip
+            asset: syncview-macos-arm64.zip
           - os: windows-latest
-            asset: syncviewr-windows-x64.zip
+            asset: syncview-windows-x64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -37,11 +37,11 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "12.0"
         run: |
           cargo build --release --features static-ffmpeg
-          otool -L target/release/syncviewr
-          if otool -L target/release/syncviewr | tail -n +2 | grep -v -E '^\s*(/usr/lib/|/System/Library/)'; then
+          otool -L target/release/syncview
+          if otool -L target/release/syncview | tail -n +2 | grep -v -E '^\s*(/usr/lib/|/System/Library/)'; then
             echo "::error::links to libraries outside the OS"; exit 1
           fi
-          codesign --force -s - target/release/syncviewr
+          codesign --force -s - target/release/syncview
 
       # ---- Windows: FFmpeg's configure needs a POSIX shell, make and nasm (MSYS2), and the
       # MSVC compiler in the environment.
@@ -83,7 +83,7 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
-          exe=target/release/syncviewr
+          exe=target/release/syncview
           [ "$RUNNER_OS" = Windows ] && exe=$exe.exe
           "$exe" --demo "$RUNNER_TEMP/demo" --cache "$RUNNER_TEMP/cache" --build-only
           # and a 2-second clip through this platform's encoder
@@ -92,7 +92,7 @@ jobs:
           ls -l clip-test
           # decoder speed and which decoder is used (VideoToolbox on macOS): the demo video (MPEG-4)
           # and the clip just made (H.264)
-          "$exe" --bench-video "$RUNNER_TEMP"/demo/syncviewr_demo_v*/demo_camera.mp4
+          "$exe" --bench-video "$RUNNER_TEMP"/demo/syncview_demo_v*/demo_camera.mp4
           "$exe" --bench-video clip-test/demo-clip-$RUNNER_OS.mp4
 
       # ---- Windows GUI check: open the start page, and the viewer on the demo, and save
@@ -102,7 +102,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          $exe = (Resolve-Path target\release\syncviewr.exe).Path
+          $exe = (Resolve-Path target\release\syncview.exe).Path
           $out = New-Item -ItemType Directory -Force -Path windows-screenshots
           function Shot($name, $argline) {
             $p = Start-Process -FilePath $exe -ArgumentList $argline -PassThru `
@@ -133,9 +133,9 @@ jobs:
         run: |
           cd target/release
           if [ "$RUNNER_OS" = macOS ]; then
-            ditto -c -k syncviewr "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+            ditto -c -k syncview "$GITHUB_WORKSPACE/${{ matrix.asset }}"
           else
-            7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" syncviewr.exe
+            7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" syncview.exe
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -157,4 +157,4 @@ jobs:
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
-          gh release upload "$TAG" syncviewr-*.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" syncview-*.zip --repo "$GITHUB_REPOSITORY" --clobber

@@ -53,13 +53,13 @@ fn paths(dir: &Path) -> Demo {
 
 /// The demo folder inside `parent`, generated on first use.
 pub fn ensure(parent: &Path) -> Result<Demo> {
-    let dir = parent.join(format!("syncviewr_demo_v{VERSION}"));
+    let dir = parent.join(format!("syncview_demo_v{VERSION}"));
     if dir.is_dir() {
         return Ok(paths(&dir));
     }
-    eprintln!("syncviewr: writing the demo recording and video to {} (once; ~100 MB)…", dir.display());
+    eprintln!("syncview: writing the demo recording and video to {} (once; ~100 MB)…", dir.display());
     let t0 = std::time::Instant::now();
-    let tmp = parent.join(format!(".syncviewr_demo_v{VERSION}.{}.tmp", std::process::id()));
+    let tmp = parent.join(format!(".syncview_demo_v{VERSION}.{}.tmp", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     let out = paths(&tmp);
     let model = Model::new();
@@ -68,12 +68,12 @@ pub fn ensure(parent: &Path) -> Result<Demo> {
     fs::write(&out.preset, serde_json::to_string_pretty(&preset())? + "\n")?;
     fs::write(tmp.join("README.txt"), README)?;
     fs::rename(&tmp, &dir).with_context(|| format!("moving the demo into {}", dir.display()))?;
-    eprintln!("syncviewr: demo written in {:.1} s", t0.elapsed().as_secs_f64());
+    eprintln!("syncview: demo written in {:.1} s", t0.elapsed().as_secs_f64());
     Ok(paths(&dir))
 }
 
 const README: &str = "\
-Synthetic data made by `syncviewr --demo`: five minutes of a chewing jaw and a stomach, as an Open
+Synthetic data made by `syncview --demo`: five minutes of a chewing jaw and a stomach, as an Open
 Ephys binary recording plus a 30 frames/s video triggered on TTL line 1. Nothing here is real data.
 
   CH1, CH2  masseter EMG (bipolar pair: CH2 carries only the shared hum and movement artefact)
@@ -86,7 +86,7 @@ Ephys binary recording plus a 30 frames/s video triggered on TTL line 1. Nothing
   TTL 2     a pulse at the start of each chewing bout (\"food delivered\")
 
 Open it again with
-  syncviewr --rec \"Record Node 101/experiment1/recording1\" --video demo_camera.mp4 --preset demo_preset.json
+  syncview --rec \"Record Node 101/experiment1/recording1\" --video demo_camera.mp4 --preset demo_preset.json
 or with Python syncview using the same three files.
 ";
 
@@ -229,7 +229,7 @@ fn write_recording(m: &Model, rec: &Path) -> Result<()> {
                 channel_name: name.to_string(),
                 description: if adc { "ADC input channel (synthetic)" } else { "Headstage channel (synthetic)" }.into(),
                 identifier: if adc { "acq-board.rhythm.continuous.adc" } else { "acq-board.rhythm.continuous.ephys" }.into(),
-                history: "syncviewr --demo".into(),
+                history: "syncview --demo".into(),
                 bit_volts: if adc { ADC_V } else { CH_UV },
                 units: if adc { "V" } else { "uV" }.into(),
                 type_code: Some(if adc { 2 } else { 0 }),
@@ -520,12 +520,12 @@ fn write_video(m: &Model, path: &Path) -> Result<()> {
             enc.send_frame(&yuv)?;
             drain(&mut enc, &mut octx)?;
         }
-        eprint!("\rsyncviewr: demo video {:.0}%", 100.0 * batch[0] as f64 / n_frames as f64);
+        eprint!("\rsyncview: demo video {:.0}%", 100.0 * batch[0] as f64 / n_frames as f64);
     }
     enc.send_eof()?;
     drain(&mut enc, &mut octx)?;
     octx.write_trailer()?;
-    eprintln!("\rsyncviewr: demo video 100%");
+    eprintln!("\rsyncview: demo video 100%");
     Ok(())
 }
 

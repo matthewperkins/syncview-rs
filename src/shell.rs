@@ -41,7 +41,7 @@ pub struct Shell {
 
 pub fn title(rec: &oe::Recording) -> String {
     format!(
-        "syncviewR — {}/{}  ({:.2} h, {} Hz)",
+        "syncview — {}/{}  ({:.2} h, {} Hz)",
         rec.rec_dir.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy(),
         rec.rec_dir.file_name().unwrap_or_default().to_string_lossy(),
         rec.duration() / 3600.0,
@@ -59,7 +59,7 @@ pub fn load_preset(path: &Option<PathBuf>, rec: &oe::Recording) -> Result<preset
 
 impl Shell {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, start: Start, screenshot: Option<(PathBuf, f64)>) -> Self {
-        crate::gpu::init(cc.wgpu_render_state.as_ref().expect("syncviewr needs the wgpu renderer"));
+        crate::gpu::init(cc.wgpu_render_state.as_ref().expect("syncview needs the wgpu renderer"));
         let ctx = &cc.egui_ctx;
         // always dark, whatever the system theme (eframe would otherwise follow it)
         ctx.set_theme(egui::ThemePreference::Dark);
@@ -89,7 +89,7 @@ impl Shell {
                 if let State::Splash(s) = &mut self.state {
                     s.error(format!("Couldn't open {}: {e:#}", l.rec.display()));
                 }
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title("syncviewR".into()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("syncview".into()));
             }
         }
     }
@@ -98,7 +98,7 @@ impl Shell {
         let rec = Arc::new(oe::Recording::open(&l.rec, self.settings.stream.as_deref())?);
         let cache = Arc::new(cache::TraceCache::new(rec.clone(), self.settings.cache_root.clone())?);
         let preset = load_preset(&l.preset, &rec)?;
-        eprintln!("syncviewr: recording {}", rec.rec_dir.display());
+        eprintln!("syncview: recording {}", rec.rec_dir.display());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title(&rec)));
         let opts = app::Options {
             preset,
@@ -127,8 +127,8 @@ impl Shell {
                 out.extend_from_slice(&[px.r(), px.g(), px.b()]);
             }
             match std::fs::write(&path, out) {
-                Ok(()) => eprintln!("syncviewr: screenshot saved to {}", path.display()),
-                Err(e) => eprintln!("syncviewr: screenshot failed: {e}"),
+                Ok(()) => eprintln!("syncview: screenshot saved to {}", path.display()),
+                Err(e) => eprintln!("syncview: screenshot failed: {e}"),
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -157,7 +157,7 @@ impl eframe::App for Shell {
                 if to_splash {
                     let mut s = Splash::new(&ctx, self.settings.cache_root.clone(), self.settings.trigger_line, self.settings.stream.clone());
                     s.take_paths(dropped);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title("syncviewR".into()));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Title("syncview".into()));
                     self.state = State::Splash(Box::new(s));
                 } else {
                     app.ui(ui);

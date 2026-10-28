@@ -1,16 +1,17 @@
-<img src="assets/icon.png" alt="syncviewR icon: an engraved mouse head with its headstage and optical ferrule, above a smoked-drum heart trace" width="128" align="right">
+<img src="assets/icon.png" alt="syncview icon: an engraved mouse head with its headstage and optical ferrule, above a smoked-drum heart trace" width="128" align="right">
 
-# syncviewR
+# syncview-rs
 
-A Rust port of [syncview](https://github.com/matthewperkins/syncview): view Open Ephys recordings
+A Rust port of the Python [syncview](https://github.com/matthewperkins/syncview) (this repository
+was called syncviewR before v0.2, and the command `syncviewr`): view Open Ephys recordings
 side by side with a behaviour video, frame-locked to the camera trigger. Built with
 [egui](https://github.com/emilk/egui)/eframe for the interface, [wgpu](https://wgpu.rs) (Vulkan,
 Metal, DirectX) for drawing the traces, and FFmpeg (`ffmpeg-next`) for video.
 
-![syncviewR on macOS: video frame-locked to masseter and digastric EMG and antrum and duodenum slow
+![syncview on macOS: video frame-locked to masseter and digastric EMG and antrum and duodenum slow
 waves, with the channel table and a whole-session slow-wave power overview](docs/screenshot-macos.png)
 
-*syncviewR on macOS: 4 of 16 channels of a 10-minute excerpt (masseter and digastric EMG, antrum and
+*syncview on macOS: 4 of 16 channels of a 10-minute excerpt (masseter and digastric EMG, antrum and
 duodenum slow waves) with the antrum's slow-wave power across the excerpt (bottom; the shaded box is
 the current view).*
 
@@ -25,20 +26,20 @@ export. It reads the same recordings and presets (and NWB recordings too).
 
 ```bash
 cd ~/Downloads
-curl -L -O https://github.com/matthewperkins/syncviewR/releases/latest/download/syncviewr-macos-arm64.zip
-unzip -o syncviewr-macos-arm64.zip syncviewr
-./syncviewr --demo
+curl -L -O https://github.com/matthewperkins/syncview-rs/releases/latest/download/syncview-macos-arm64.zip
+unzip -o syncview-macos-arm64.zip syncview
+./syncview --demo
 ```
 
-To run it from any folder, move it onto your PATH: `sudo mv syncviewr /usr/local/bin/`. The build is
+To run it from any folder, move it onto your PATH: `sudo mv syncview /usr/local/bin/`. The build is
 not signed with an Apple Developer ID. A file downloaded with `curl` isn't marked as quarantined,
 so macOS runs it straight away. If you download the zip with a browser instead, clear the flag once
-with `xattr -d com.apple.quarantine syncviewr`, or use System Settings → Privacy & Security →
+with `xattr -d com.apple.quarantine syncview`, or use System Settings → Privacy & Security →
 Open Anyway.
 
-**Prebuilt (Windows, x64).** Download `syncviewr-windows-x64.zip` from the
-[latest release](https://github.com/matthewperkins/syncviewR/releases/latest), unzip it and
-double-click `syncviewr.exe`, or run it from PowerShell (`.\syncviewr.exe --demo`). The build is
+**Prebuilt (Windows, x64).** Download `syncview-windows-x64.zip` from the
+[latest release](https://github.com/matthewperkins/syncview-rs/releases/latest), unzip it and
+double-click `syncview.exe`, or run it from PowerShell (`.\syncview.exe --demo`). The build is
 not code-signed, so the first time Windows shows "Windows protected your PC": click *More info* →
 *Run anyway*. Linux and Intel Macs build from source as below.
 
@@ -46,7 +47,7 @@ Both prebuilt binaries are built by GitHub Actions from the tagged commit
 (`.github/workflows/release.yml`).
 
 **From source.** You need Rust (1.89 or newer) and a C compiler. The `static-ffmpeg` option compiles FFmpeg into
-syncviewR, so nothing else is needed and the program keeps working when system packages change.
+syncview, so nothing else is needed and the program keeps working when system packages change.
 
 ```bash
 # macOS (once): Apple's compiler tools and Rust
@@ -54,10 +55,10 @@ xcode-select --install
 brew install rust            # or https://rustup.rs
 
 # then
-cargo install --git https://github.com/matthewperkins/syncviewR --features static-ffmpeg
+cargo install --git https://github.com/matthewperkins/syncview-rs --features static-ffmpeg
 ```
 
-That builds and installs the `syncviewr` command into `~/.cargo/bin` (add it to your PATH if your
+That builds and installs the `syncview` command into `~/.cargo/bin` (add it to your PATH if your
 shell doesn't find it). The first build takes about 5–10 minutes, most of it compiling FFmpeg. To
 update, run the same command again.
 
@@ -66,14 +67,14 @@ On Linux the same command works; x86-64 also needs `nasm` (e.g. `sudo pacman -S 
 **Building against the system's FFmpeg instead** (faster first build, but it has to be rebuilt
 whenever the system's FFmpeg changes major version): install FFmpeg's libraries and `pkgconf`
 (`brew install ffmpeg pkgconf`, or `sudo pacman -S ffmpeg`) and leave out `--features static-ffmpeg`.
-From a checkout: `cargo build --release` gives `target/release/syncviewr`.
+From a checkout: `cargo build --release` gives `target/release/syncview`.
 
 ## Try it without a rig
 
 Click **Try the demo** on the start page, or run
 
 ```bash
-syncviewr --demo
+syncview --demo
 ```
 
 Either writes a synthetic five-minute recording, a matching cartoon video and a preset (~100 MB, about
@@ -81,14 +82,14 @@ Either writes a synthetic five-minute recording, a matching cartoon video and a 
 digastric EMG, a jaw-position sensor and a bipolar masseter pair whose reference wire carries only
 hum and movement artefact), antral slow waves that grow after each meal, duodenal slow waves, and
 mains hum for the notch. Each video frame shows its frame number and its trigger's time, so the
-sync can be checked by eye. `syncviewr --demo DIR` writes it into DIR instead. The folder is an
+sync can be checked by eye. `syncview --demo DIR` writes it into DIR instead. The folder is an
 ordinary Open Ephys recording, so Python syncview opens it too (see its `README.txt`).
 
 ## Run
 
 ```bash
-syncviewr                           # start page: drop a folder and/or a video, or try the demo
-syncviewr /path/to/folder           # finds the recording, video and preset inside it
+syncview                          # start page: drop a folder and/or a video, or try the demo
+syncview /path/to/folder          # finds the recording, video and preset inside it
 ```
 
 **Start page.** Drag an Open Ephys folder onto the window, or click *Choose folder…*. The folder
@@ -102,15 +103,15 @@ warning says so before the viewer opens: open anyway, open without the video, or
 the folder is used. While viewing, drop a video on the window to attach it, or drop another folder
 to go back to the start page with it.
 
-**A folder on the command line** works the same way. syncviewR searches it for Open Ephys
+**A folder on the command line** works the same way. syncview searches it for Open Ephys
 recordings (folders containing `structure.oebin`, or `.nwb` files), videos (`.mp4`, `.mov`, `.avi`,
 `.mkv`) and a preset JSON at its top level (if there are several, the one named `preset.json`). With
 one recording and at most one video it opens them straight away. Otherwise the start page asks.
-In Terminal, you can type `syncviewr ` and drag the folder in from Finder. To skip the search,
+In Terminal, you can type `syncview ` and drag the folder in from Finder. To skip the search,
 name the files:
 
 ```bash
-syncviewr --rec "/path/to/Record Node 101/experiment1/recording1" \
+syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
           --video /path/to/BASLER_CAM_….mp4 \
           --preset presets.json          # optional; default: all electrode channels as EMG
 ```
@@ -123,7 +124,7 @@ syncviewr --rec "/path/to/Record Node 101/experiment1/recording1" \
 | `--preset FILE.json` | built from the recording | same JSON as Python syncview |
 | `--stream NAME` | `acquisition_board`, else the first stream | Open Ephys continuous stream |
 | `--trigger-line N` | `1` | TTL line with one pulse per video frame |
-| `--cache FOLDER` | `$SYNCVIEWR_CACHE`, else `~/.cache/syncviewr` (Linux), `~/Library/Caches/syncviewr` (macOS) | filtered traces |
+| `--cache FOLDER` | `$SYNCVIEW_RS_CACHE`, else `~/.cache/syncview-rs` (Linux), `~/Library/Caches/syncview-rs` (macOS) | filtered traces |
 | `--time S`, `--time-base S`, `--play` | | initial position, view width, start playing |
 
 Controls are as in syncview: scroll = zoom time; sideways swipe, Shift+scroll or drag = pan;
@@ -143,8 +144,8 @@ Remove and as the template for Add. **Load…/Save…** read and write presets i
 
 **Sharing a cache with Python syncview.** Cache entries use the same keys and layout, so
 `--cache` pointed at a Python syncview cache folder reuses its filtered traces and video indexes
-(and vice versa, untested in that direction since v0.1.6: syncviewR now stores traces as float16,
-half the disk space of Python's float32). Slow-mode traces are the exception: syncviewR decimates
+(and vice versa, untested in that direction since v0.1.6: the Rust port now stores traces as float16,
+half the disk space of Python's float32). Slow-mode traces are the exception: the Rust port decimates
 before filtering them, so it keeps its own.
 
 ## Export a clip
@@ -163,12 +164,12 @@ their colours and Y ranges, scrolling past a fixed cursor at each frame's trigge
 Export runs in the background, with progress and Cancel. From the command line, for batches:
 
 ```bash
-syncviewr /path/to/folder --export-clip chewing.mp4 --clip-from 1:45 --clip-to 1:55 \
+syncview /path/to/folder --export-clip chewing.mp4 --clip-from 1:45 --clip-to 1:55 \
           [--clip-time-base 4] [--clip-width 1280] [--clip-speed 0.25]
 ```
 
 This uses the preset's shown rows (Y ranges from the preset, or automatic). Clips are H.264 where
-syncviewR's FFmpeg can encode it (macOS: Apple's VideoToolbox; builds against a system FFmpeg with
+syncview's FFmpeg can encode it (macOS: Apple's VideoToolbox; builds against a system FFmpeg with
 x264), otherwise FFmpeg's own MPEG-4 (Part 2) encoder at high quality (the prebuilt Windows binary). VLC
 plays both; most other players and PowerPoint support MPEG-4 Part 2 too, but H.264 is the safer
 choice for slides.
@@ -180,7 +181,7 @@ Each row is one GPU polyline (`src/gpu.rs`), drawn inside egui's render pass thr
 whole session is filtered once into a min/max pyramid on disk (`src/cache.rs`), and each frame reads
 the coarsest level with at least one block per pixel column. Each segment is drawn as a quad with
 antialiased sides, one logical pixel wide, so lines stay continuous on 1x screens too
-(`SYNCVIEWR_LINE_PX` sets another width, in physical pixels).
+(`SYNCVIEW_RS_LINE_PX` sets another width, in physical pixels).
 
 ## Checked
 

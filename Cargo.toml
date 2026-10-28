@@ -1,5 +1,5 @@
 [package]
-name = "syncviewr"
+name = "syncview"
 version = "0.1.9"
 edition = "2024"
 description = "Open Ephys + behaviour video viewer (egui + wgpu), a Rust port of syncview"

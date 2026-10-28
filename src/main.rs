@@ -1,4 +1,4 @@
-//! syncviewR: an Open Ephys + behaviour-video viewer in Rust (egui + wgpu), modelled on the Python
+//! syncview: an Open Ephys + behaviour-video viewer in Rust (egui + wgpu), modelled on the Python
 //! syncview. Video frame k is locked to the k-th rising edge of the camera trigger line.
 
 // Windows: no console window when started by double-click; see attach_console.
@@ -44,7 +44,7 @@ struct Cli {
     /// Open Ephys recording folder (…/experimentN/recordingM, containing structure.oebin)
     #[arg(long)]
     rec: Option<PathBuf>,
-    /// try syncviewR on synthetic data: writes a 5-minute recording, a matching video and a preset
+    /// try syncview on synthetic data: writes a 5-minute recording, a matching video and a preset
     /// (~100 MB) into DIR (default: the cache folder) on first use, then opens them
     #[arg(long, value_name = "DIR", num_args = 0..=1, conflicts_with = "rec")]
     demo: Option<Option<PathBuf>>,
@@ -54,8 +54,8 @@ struct Cli {
     /// channel preset JSON (same format as Python syncview); default: all electrode channels
     #[arg(long)]
     preset: Option<PathBuf>,
-    /// cache folder for filtered traces and video indexes (default: $SYNCVIEWR_CACHE, else the
-    /// platform's user cache folder + /syncviewr). Pointing it at a Python syncview cache reuses it.
+    /// cache folder for filtered traces and video indexes (default: $SYNCVIEW_RS_CACHE, else the
+    /// platform's user cache folder + /syncview-rs). Pointing it at a Python syncview cache reuses it.
     #[arg(long)]
     cache: Option<PathBuf>,
     /// Open Ephys continuous stream holding the data and the camera TTL (default:
@@ -153,7 +153,7 @@ fn main() -> Result<()> {
         return video::bench(v);
     }
     let root = cli.cache.clone().unwrap_or_else(cache::default_root);
-    eprintln!("syncviewr: cache folder {}", root.display());
+    eprintln!("syncview: cache folder {}", root.display());
     let mut start = shell::Start::Splash(vec![]);
     if let Some(dir) = &cli.demo {
         let d = demo::ensure(dir.as_ref().unwrap_or(&root))?;
@@ -163,9 +163,9 @@ fn main() -> Result<()> {
         start = match folder::resolve(dir, cli.video.is_none(), cli.preset.is_none()) {
             Ok(f) => {
                 let show = |p: &Option<PathBuf>| p.as_ref().map_or("none".into(), |p| p.display().to_string());
-                eprintln!("syncviewr: recording {}", f.rec.display());
-                eprintln!("syncviewr: video {}", show(&f.video));
-                eprintln!("syncviewr: preset {}", show(&f.preset));
+                eprintln!("syncview: recording {}", f.rec.display());
+                eprintln!("syncview: video {}", show(&f.video));
+                eprintln!("syncview: preset {}", show(&f.preset));
                 shell::Start::Viewer(splash::Launch {
                     rec: f.rec,
                     video: cli.video.clone().or(f.video),
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
         let n = video::frame_pts(&video, &index_dir)?.len();
         let sync = oe::check_sync(&rec, n, cli.trigger_line, video::video_duration(&video)).map_err(|e| anyhow::anyhow!(e))?;
         for i in &sync.issues {
-            eprintln!("syncviewr: warning: {i}");
+            eprintln!("syncview: warning: {i}");
         }
         let job = clip::ClipJob { out: out.clone(), video, from, to, time_base: cli.clip_time_base, width: cli.clip_width, speed: cli.clip_speed, rows };
         let t0 = std::time::Instant::now();
@@ -222,7 +222,7 @@ fn main() -> Result<()> {
         };
         let done = clip::render(&job, &rec, &cache, &sync.frames, sync.period, &index_dir, &progress, &|| false)?;
         eprintln!(
-            "\nsyncviewr: wrote {} ({} frames, {}x{} at {:.3} frames/s, {}) in {:.1} s",
+            "\nsyncview: wrote {} ({} frames, {}x{} at {:.3} frames/s, {}) in {:.1} s",
             out.display(),
             done.frames,
             done.size.0,
@@ -258,7 +258,7 @@ fn main() -> Result<()> {
         specs.extend(p.overview);
         let t0 = std::time::Instant::now();
         cache.build(&specs, &|f| eprint!("\rbuilding {:.0}%", f * 100.0), &|| false)?;
-        eprintln!("\nsyncviewr: built {} traces in {:.1} s", specs.len(), t0.elapsed().as_secs_f64());
+        eprintln!("\nsyncview: built {} traces in {:.1} s", specs.len(), t0.elapsed().as_secs_f64());
         if let Some(t) = cache.last_build.lock().unwrap().as_ref() {
             eprintln!("{t}");
         }
@@ -270,12 +270,12 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1700.0, 1000.0])
-            .with_title("syncviewR")
-            .with_app_id("syncviewr")
+            .with_title("syncview")
+            .with_app_id("syncview")
             .with_drag_and_drop(true)
             .with_icon(Arc::new(eframe::icon_data::from_png_bytes(ICON_PNG).context("decoding the app icon")?)),
         ..Default::default()
     };
-    eframe::run_native("syncviewr", native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, settings, start, screenshot)))))
+    eframe::run_native("syncview", native, Box::new(move |cc| Ok(Box::new(shell::Shell::new(cc, settings, start, screenshot)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -1,4 +1,4 @@
-//! `syncviewr FOLDER`: find the recording, video and preset inside a folder, so a shared sample
+//! `syncview FOLDER`: find the recording, video and preset inside a folder, so a shared sample
 //! (or a session folder) opens without typing `--rec "Record Node 101/…"` and `--video …`.
 
 use crate::preset::Preset;
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn finds_recording_video_and_preset() {
-        let d = std::env::temp_dir().join(format!("syncviewr_folder_test_{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("syncview_folder_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let rec = d.join("Record Node 101/experiment3/recording1");
         touch(&rec.join("structure.oebin"), "{}");

@@ -30,7 +30,7 @@ impl Recording {
         let stream = c.name().to_string();
         let index = rec.continuous().iter().position(|x| std::ptr::eq(x, c)).unwrap();
         if !c.is_contiguous() {
-            eprintln!("syncviewr: warning: continuous sample numbers are not contiguous (dropped samples?) - sync may be off.");
+            eprintln!("syncview: warning: continuous sample numbers are not contiguous (dropped samples?) - sync may be off.");
         }
         let s = Self {
             rec_dir: rec.dir().to_path_buf(),
@@ -42,7 +42,7 @@ impl Recording {
             rec,
         };
         if s.rec.ttl_for(s.cont()).next().is_none() {
-            eprintln!("syncviewr: warning: no TTL events for stream {stream:?} - video sync is impossible.");
+            eprintln!("syncview: warning: no TTL events for stream {stream:?} - video sync is impossible.");
         }
         Ok(s)
     }

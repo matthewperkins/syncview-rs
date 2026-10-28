@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn float16_files() {
-        let d = std::env::temp_dir().join(format!("syncviewr_npy_test_{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("syncview_npy_test_{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         // small (read into memory) and large (memory-mapped) files, written both ways
         for n in [1000, (MMAP_MIN_BYTES / 2 + 10) as usize] {

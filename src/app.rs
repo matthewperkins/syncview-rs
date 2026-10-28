@@ -184,7 +184,7 @@ pub struct App {
     status: String,
     dialogs: Vec<(String, String)>,
     was_building: bool,
-    fps: Option<(Instant, Vec<f64>)>, // SYNCVIEWR_FPS=1: per-second frame-time report
+    fps: Option<(Instant, Vec<f64>)>, // SYNCVIEW_RS_FPS=1: per-second frame-time report
 }
 
 fn hex(s: &str) -> Color32 {
@@ -309,7 +309,7 @@ impl App {
             status: String::new(),
             dialogs: vec![],
             was_building: false,
-            fps: std::env::var_os("SYNCVIEWR_FPS").map(|_| (Instant::now(), vec![])),
+            fps: std::env::var_os("SYNCVIEW_RS_FPS").map(|_| (Instant::now(), vec![])),
             rec,
             cache,
         };
@@ -330,7 +330,7 @@ impl App {
         let (mut p, mut problems) = preset::check(p, &self.rec);
         if !problems.is_empty() {
             for m in &problems {
-                eprintln!("syncviewr: preset: {m}");
+                eprintln!("syncview: preset: {m}");
             }
             if p.channels.is_empty() {
                 problems.push("No usable rows left - showing the recording's own channels instead.".into());
@@ -451,7 +451,7 @@ impl App {
             Some(Ok(info)) => {
                 match check_sync(&self.rec, info.n_frames, self.trigger_line, video_duration(&v.path)) {
                     Err(e) => {
-                        eprintln!("syncviewr: sync error ({name}): {e}");
+                        eprintln!("syncview: sync error ({name}): {e}");
                         self.video_msg = format!("{name}: {e}");
                         self.dialogs.push(("Video sync failed".into(), format!("{name} on TTL line {}:\n\n• {e}", self.trigger_line)));
                         self.video = None;
@@ -459,7 +459,7 @@ impl App {
                     }
                     Ok(si) => {
                         for m in &si.issues {
-                            eprintln!("syncviewr: sync warning ({name}): {m}");
+                            eprintln!("syncview: sync warning ({name}): {m}");
                         }
                         if !si.issues.is_empty() {
                             let body = si.issues.iter().map(|m| format!("• {m}")).collect::<Vec<_>>().join("\n\n");
@@ -482,7 +482,7 @@ impl App {
                 }
             }
             Some(Err(msg)) => {
-                eprintln!("syncviewr: {msg}");
+                eprintln!("syncview: {msg}");
                 self.video_msg = msg;
             }
             None => {}
@@ -1387,8 +1387,8 @@ impl App {
             self.traces_ui(ui);
         });
         self.dialogs_ui(&ctx);
-        // (testing: SYNCVIEWR_TEST_EXPORT=1 opens the export dialog once the video is synced)
-        if self.video_ready && !self.export.open && self.export.from.is_empty() && std::env::var_os("SYNCVIEWR_TEST_EXPORT").is_some() {
+        // (testing: SYNCVIEW_RS_TEST_EXPORT=1 opens the export dialog once the video is synced)
+        if self.video_ready && !self.export.open && self.export.from.is_empty() && std::env::var_os("SYNCVIEW_RS_TEST_EXPORT").is_some() {
             self.open_export();
         }
         self.export_ui(&ctx);

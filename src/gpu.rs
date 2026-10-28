@@ -64,11 +64,11 @@ pub struct LineResources {
 pub fn init(rs: &egui_wgpu::RenderState) {
     let device = &rs.device;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("syncviewr lines"),
+        label: Some("syncview lines"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
     });
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("syncviewr lines"),
+        label: Some("syncview lines"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -77,12 +77,12 @@ pub fn init(rs: &egui_wgpu::RenderState) {
         }],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("syncviewr lines"),
+        label: Some("syncview lines"),
         bind_group_layouts: &[Some(&bind_layout)],
         immediate_size: 0,
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("syncviewr lines"),
+        label: Some("syncview lines"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -133,10 +133,10 @@ fn rgba(c: egui::Color32, srgb: bool) -> [f32; 4] {
 }
 
 /// Line width in physical pixels: one logical pixel (1 on ordinary screens, 2 on Retina).
-/// SYNCVIEWR_LINE_PX overrides it (any width stays continuous; thinner lines just get fainter).
+/// SYNCVIEW_RS_LINE_PX overrides it (any width stays continuous; thinner lines just get fainter).
 fn width_px(ppp: f32) -> f32 {
     static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-    let o = *OVERRIDE.get_or_init(|| std::env::var("SYNCVIEWR_LINE_PX").ok().and_then(|v| v.parse().ok()).filter(|w: &f32| *w > 0.0));
+    let o = *OVERRIDE.get_or_init(|| std::env::var("SYNCVIEW_RS_LINE_PX").ok().and_then(|v| v.parse().ok()).filter(|w: &f32| *w > 0.0));
     o.unwrap_or(ppp.max(1.0))
 }
 

@@ -207,7 +207,7 @@ impl TraceCache {
                 Some(t)
             }
             Err(e) => {
-                eprintln!("syncviewr: unreadable cache entry {} ({e:#}); rebuilding", folder.display());
+                eprintln!("syncview: unreadable cache entry {} ({e:#}); rebuilding", folder.display());
                 let _ = std::fs::remove_file(folder.join("meta.json"));
                 None
             }
@@ -385,7 +385,7 @@ impl TraceCache {
                     m.remove("show");
                 }
                 let meta = json!({"spec": spec_json, "step": st, "dt": *st as f64 / fs, "n": y.len(), "levels": levels,
-                                  "stats": stats(SampleSlice::F16(y)), "built": format!("syncviewr {}", env!("CARGO_PKG_VERSION"))});
+                                  "stats": stats(SampleSlice::F16(y)), "built": format!("syncview {}", env!("CARGO_PKG_VERSION"))});
                 std::fs::write(d.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
                 Ok(())
             })?;
@@ -488,7 +488,7 @@ impl CacheBuilder {
                     };
                     report(0.0);
                     if let Err(e) = cache.build(&todo, &report, &cancel) {
-                        eprintln!("syncviewr: cache build failed: {e:#}");
+                        eprintln!("syncview: cache build failed: {e:#}");
                     }
                 }
                 *pr.lock().unwrap() = None;
@@ -587,7 +587,7 @@ impl WindowWorker {
                                     on_change();
                                 }
                             }
-                            Err(e) => eprintln!("syncviewr: {e:#}"),
+                            Err(e) => eprintln!("syncview: {e:#}"),
                         }
                     })
                 });
@@ -620,9 +620,10 @@ impl Drop for WindowWorker {
     }
 }
 
-/// Cache root: --cache > $SYNCVIEWR_CACHE > the platform's per-user cache folder.
+/// Cache root: --cache > $SYNCVIEW_RS_CACHE (or the pre-0.2 $SYNCVIEWR_CACHE) > the platform's
+/// per-user cache folder.
 pub fn default_root() -> PathBuf {
-    if let Some(p) = std::env::var_os("SYNCVIEWR_CACHE") {
+    if let Some(p) = std::env::var_os("SYNCVIEW_RS_CACHE").or_else(|| std::env::var_os("SYNCVIEWR_CACHE")) {
         return PathBuf::from(p);
     }
     platform_root()
@@ -637,5 +638,12 @@ pub fn platform_root() -> PathBuf {
     } else {
         std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache"))
     };
-    base.join("syncviewr")
+    // Not "syncview": that is the Python viewer's cache folder.
+    let root = base.join("syncview-rs");
+    // Before v0.2 the folder was "syncviewr"; move it so its traces needn't be rebuilt.
+    let old = base.join("syncviewr");
+    if !root.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &root);
+    }
+    root
 }
