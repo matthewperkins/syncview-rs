@@ -93,14 +93,20 @@ pub struct Preset {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
-    /// The video floats behind the trace rows instead of sitting above them.
-    pub overlay: bool,
-    /// The floating video's left and top edges (fractions of the trace area) and its width
+    /// The video is a movable box in the viewing area instead of sitting above the chart
+    /// ("overlay" in v0.2.3 presets).
+    #[serde(alias = "overlay")]
+    pub float_video: bool,
+    /// The floating video's left and top edges (fractions of the viewing area) and its width
     /// (fraction of the area's width); its height follows the video's aspect ratio.
     pub video: [f32; 3],
-    /// Drags pan time instead of moving the video.
+    /// The chart (rows, axes and labels) is a movable box instead of filling the area.
+    pub float_chart: bool,
+    /// The floating chart's left, top, width and height, as fractions of the viewing area.
+    pub chart: [f32; 4],
+    /// Drags pan time instead of moving and resizing the floating boxes.
     pub locked: bool,
-    /// How much the floating video is darkened, 0 to 0.9.
+    /// How much the video is darkened where the chart covers it, 0 to 0.9.
     pub dim: f32,
     /// A dark line under each trace, extending outline_px beyond it on each side.
     pub outline: bool,
@@ -109,7 +115,16 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Layout { overlay: false, video: [0.5, 0.0, 0.5], locked: false, dim: 0.4, outline: false, outline_px: 1.5 }
+        Layout {
+            float_video: false,
+            video: [0.5, 0.0, 0.5],
+            float_chart: false,
+            chart: [0.0, 0.45, 0.6, 0.55],
+            locked: false,
+            dim: 0.4,
+            outline: false,
+            outline_px: 1.5,
+        }
     }
 }
 
@@ -182,9 +197,10 @@ fn layout_is_optional_and_fills_in_defaults() {
     let p: Preset = serde_json::from_str(r#"{"channels": []}"#).unwrap();
     assert!(p.layout.is_none());
     assert!(serde_json::to_value(&p).unwrap().get("layout").is_none());
+    // v0.2.3 wrote "overlay" for what is now float_video
     let p: Preset = serde_json::from_str(r#"{"channels": [], "layout": {"overlay": true, "dim": 0.6}}"#).unwrap();
     let l = p.layout.unwrap();
-    assert!(l.overlay && l.dim == 0.6);
+    assert!(l.float_video && !l.float_chart && l.dim == 0.6);
     assert_eq!(l.video, Layout::default().video);
     assert!(!l.outline && l.outline_px == Layout::default().outline_px);
 }

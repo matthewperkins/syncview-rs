@@ -145,11 +145,21 @@ Controls are as in syncview: scroll = zoom time; sideways swipe, Shift+scroll or
 
 **Channel table** (right): Show, Label, Ch, Ref (bipolar reference), Mode, Low/High Hz (blank =
 no filter edge), Notch (e.g. `60` or `60,180`), DSP wzrd (`order=3 smooth_ms=10 env_lp=40 plot_fs=1000
-win_s=30`), Y range (`auto` or `lo, hi`). Text fields apply on Enter or when you click away; input
+win_s=30`), Y range (`auto` or `lo, hi`), Clip (a three-position switch: a trace that leaves its Y
+range is cut off at its own row, at the chart's edges, or nowhere, so it can also draw over the
+video and the overview strip; it keeps its row's scale). Text fields apply on Enter or when you click away; input
 that doesn't parse reverts. Changing a row's mode resets its band and DSP wzrd settings to that mode's
 defaults (Python syncview keeps the old band). Click a row's number to select it for Up / Down /
 Remove and as the template for Add. **Load…/Save…** read and write presets in the Python format
 (time base, rows, overview); **Video…** attaches a video.
+
+**Layout.** By default the video sits above the chart. **Float video** turns the video into a box
+over the chart, **Float chart** turns the chart into a box over the video, and with both on each
+is a box of its own; the chart is always drawn on top. While the padlock is open, drag a box to
+move it and its bottom-right corner to resize it; lock it and drags pan time again (the wheel
+zooms either way). **dim** darkens the video where the chart covers it, and **outline** draws a
+dark edge under every trace so it stands out over the video. Presets save the clip settings and
+the layout too; the Python version ignores them.
 
 **Rows of one muscle share a colour.** Rows named alike apart from a trailing number
 (masseter1 … masseter4, antrum 1 … antrum 4) get the same colour; a preset's own `color` wins.

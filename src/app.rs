@@ -190,6 +190,40 @@ pub struct App {
     layout: preset::Layout,
 }
 
+/// `b` moved (and shrunk if need be) to lie inside `a`; `aspect` (height / width) is kept.
+fn fit_inside(b: Rect, a: Rect, aspect: Option<f32>) -> Rect {
+    let size = match aspect {
+        Some(k) => {
+            let w = b.width().min(a.width()).min(a.height() / k);
+            Vec2::new(w, w * k)
+        }
+        None => b.size().min(a.size()),
+    };
+    let min = Pos2::new(b.min.x.clamp(a.min.x, a.max.x - size.x), b.min.y.clamp(a.min.y, a.max.y - size.y));
+    Rect::from_min_size(min, size)
+}
+
+/// Arrange mode: drag box `b` to move it, its bottom-right corner to resize it (keeping `aspect`,
+/// at least `min` in size); it stays inside `a`. Returns the new box.
+fn drag_box(ui: &egui::Ui, a: Rect, id: &str, b: Rect, aspect: Option<f32>, min: Vec2) -> Rect {
+    let handle = Rect::from_center_size(b.right_bottom() - Vec2::splat(6.0), Vec2::splat(16.0));
+    let mv = ui.interact(b, ui.id().with((id, "move")), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+    let rs = ui.interact(handle, ui.id().with((id, "resize")), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+    let new = if rs.dragged() {
+        let mut size = b.size() + rs.drag_delta();
+        if let Some(k) = aspect {
+            size.y = size.x * k;
+        }
+        Rect::from_min_size(b.min, size.max(min))
+    } else if mv.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        b.translate(mv.drag_delta())
+    } else {
+        b
+    };
+    fit_inside(new, a, aspect)
+}
+
 /// The Clip column: a three-position slider switch (row | chart | none); click or drag a stop.
 /// True if it changed.
 fn clip_switch(ui: &mut egui::Ui, clip: &mut Clip) -> bool {
@@ -595,44 +629,89 @@ impl App {
         self.video.is_some() || self.video_tex.is_some()
     }
 
-    /// Overlay mode: the floating video's rect in the trace area, or None if there is no video.
-    fn video_box(&self, area: Rect) -> Option<Rect> {
-        if !self.layout.overlay || !self.has_video() {
-            return None;
-        }
-        let [w, h] = self.video_size;
-        let aspect = if w > 0 && h > 0 { h as f32 / w as f32 } else { 0.75 };
-        let [fx, fy, fw] = self.layout.video;
-        let width = fw * area.width();
-        Some(Rect::from_min_size(area.min + Vec2::new(fx * area.width(), fy * area.height()), Vec2::new(width, width * aspect)))
+    /// Whether the video or the chart floats (otherwise the video sits above the chart).
+    fn floating(&self) -> bool {
+        (self.layout.float_video && self.has_video()) || self.layout.float_chart
     }
 
-    /// Overlay mode, unlocked: drag the video to move it, its corner handle to resize it.
-    /// Registered after the trace area's own response, so it takes the drag where they overlap.
-    /// True if the pointer is over it.
-    fn video_box_ui(&mut self, ui: &mut egui::Ui, area: Rect) -> bool {
-        let Some(b) = self.video_box(area) else { return false };
-        if self.layout.locked {
-            return false;
+    /// Height / width of the video frame.
+    fn video_aspect(&self) -> f32 {
+        let [w, h] = self.video_size;
+        if w > 0 && h > 0 { h as f32 / w as f32 } else { 0.75 }
+    }
+
+    /// Where the video (if any) and the chart go in the viewing area `a`: each is its floating
+    /// box, or else the video is fitted into the area and the chart fills it.
+    fn boxes(&self, a: Rect) -> (Option<Rect>, Rect) {
+        let l = &self.layout;
+        let k = self.video_aspect();
+        let video = if !self.has_video() {
+            None
+        } else if l.float_video {
+            let [x, y, w] = l.video;
+            let w = w * a.width();
+            Some(fit_inside(Rect::from_min_size(a.min + Vec2::new(x * a.width(), y * a.height()), Vec2::new(w, w * k)), a, Some(k)))
+        } else {
+            let w = a.width().min(a.height() / k);
+            Some(Rect::from_center_size(a.center(), Vec2::new(w, w * k)))
+        };
+        let chart = if l.float_chart {
+            let [x, y, w, h] = l.chart;
+            fit_inside(Rect::from_min_size(a.min + Vec2::new(x * a.width(), y * a.height()), Vec2::new(w * a.width(), h * a.height())), a, None)
+        } else {
+            a
+        };
+        (video, chart)
+    }
+
+    /// The viewing area when the video or the chart floats. Unlocked, drags move and resize the
+    /// floating boxes (the chart, drawn on top, takes the drag where they overlap); locked, drags
+    /// pan time. The video is darkened where the chart covers it.
+    fn view_ui(&mut self, ui: &mut egui::Ui) {
+        let a = ui.available_rect_before_wrap();
+        ui.allocate_rect(a, Sense::hover());
+        if a.width() < 60.0 || a.height() < 60.0 {
+            return;
         }
-        let handle = Rect::from_center_size(b.right_bottom(), Vec2::splat(16.0));
-        let mv = ui.interact(b, ui.id().with("video_move"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
-        let rs = ui.interact(handle, ui.id().with("video_resize"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
-        let (aw, ah) = (area.width().max(1.0), area.height().max(1.0));
-        let [mut fx, mut fy, mut fw] = self.layout.video;
-        if rs.dragged() {
-            fw = ((b.width() + rs.drag_delta().x) / aw).clamp(80.0 / aw, 1.5);
-        } else if mv.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            fx += mv.drag_delta().x / aw;
-            fy += mv.drag_delta().y / ah;
+        let (video, chart) = self.boxes(a);
+        let resp = ui.interact(chart, ui.id().with("chart"), Sense::click_and_drag());
+        if !self.layout.locked {
+            let fx = |b: Rect| (b.min.x - a.min.x) / a.width();
+            let fy = |b: Rect| (b.min.y - a.min.y) / a.height();
+            if self.layout.float_video
+                && let Some(v) = video
+            {
+                let k = self.video_aspect();
+                let b = drag_box(ui, a, "video_box", v, Some(k), Vec2::new(80.0, 80.0 * k));
+                self.layout.video = [fx(b), fy(b), b.width() / a.width()];
+            }
+            if self.layout.float_chart {
+                let b = drag_box(ui, a, "chart_box", chart, None, Vec2::new(240.0, 140.0));
+                self.layout.chart = [fx(b), fy(b), b.width() / a.width(), b.height() / a.height()];
+            }
         }
-        // keep at least 40 points of it inside the area
-        let (bw, bh) = (fw * aw, b.height() * fw * aw / b.width().max(1.0));
-        fx = fx.clamp((40.0 - bw) / aw, 1.0 - 40.0 / aw);
-        fy = fy.clamp((40.0 - bh) / ah, 1.0 - 40.0 / ah);
-        self.layout.video = [fx, fy, fw];
-        mv.hovered() || rs.hovered()
+        let (video, chart) = self.boxes(a);
+        let p = ui.painter_at(a);
+        p.rect_filled(a, 0.0, BG);
+        if let Some(v) = video {
+            self.paint_video(&p, v, 0.0);
+            let under = v.intersect(chart);
+            if self.layout.dim > 0.0 && under.is_positive() {
+                p.rect_filled(under, 0.0, Color32::from_black_alpha((self.layout.dim.clamp(0.0, 1.0) * 255.0) as u8));
+            }
+        }
+        let pointer_in = ui.ui_contains_pointer() && ui.ctx().pointer_hover_pos().is_some_and(|q| chart.contains(q));
+        self.traces_ui(ui, chart, &resp, pointer_in);
+        if !self.layout.locked {
+            // arrange mode: outline each floating box and mark its resize corner
+            let floating = [video.filter(|_| self.layout.float_video), self.layout.float_chart.then_some(chart)];
+            let p = ui.painter_at(a);
+            for b in floating.into_iter().flatten() {
+                p.rect_stroke(b, 0.0, Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
+                let c = b.right_bottom();
+                p.add(egui::Shape::convex_polygon(vec![c, c - Vec2::new(12.0, 0.0), c - Vec2::new(0.0, 12.0)], MUTED, Stroke::NONE));
+            }
+        }
     }
 
     // ------------------------------------------------------------------ data
@@ -816,22 +895,33 @@ impl App {
             ui.separator();
             let has_video = self.has_video();
             if ui
-                .add_enabled(has_video, egui::Button::selectable(self.layout.overlay, "Overlay"))
-                .on_hover_text("float the video behind the traces; drag it to move it, its corner to resize it")
+                .add_enabled(has_video, egui::Button::selectable(self.layout.float_video, "Float video"))
+                .on_hover_text("make the video a box you can move and resize (unlocked: drag it, or its corner)")
                 .on_disabled_hover_text("attach a video first")
                 .clicked()
             {
-                self.layout.overlay = !self.layout.overlay;
+                self.layout.float_video = !self.layout.float_video;
             }
-            if self.layout.overlay && has_video {
+            if ui
+                .add(egui::Button::selectable(self.layout.float_chart, "Float chart"))
+                .on_hover_text("make the chart a box you can move and resize, over the video (unlocked: drag it, or its corner)")
+                .clicked()
+            {
+                self.layout.float_chart = !self.layout.float_chart;
+            }
+            if self.floating() {
                 let lock = if self.layout.locked { "🔒" } else { "🔓" };
                 if ui.add(egui::Button::selectable(self.layout.locked, lock))
-                    .on_hover_text(if self.layout.locked { "video locked: drags pan time (click to unlock)" } else { "lock the video in place, so drags pan time" })
+                    .on_hover_text(if self.layout.locked {
+                        "layout locked: drags pan time (click to unlock and arrange the floating boxes)"
+                    } else {
+                        "arranging: drags move and resize the floating boxes; click to lock them, so drags pan time"
+                    })
                     .clicked()
                 {
                     self.layout.locked = !self.layout.locked;
                 }
-                ui.label("dim").on_hover_text("darken the video under the traces");
+                ui.label("dim").on_hover_text("darken the video where the chart covers it");
                 ui.add(egui::Slider::new(&mut self.layout.dim, 0.0..=0.9).show_value(false)).on_hover_text(format!("{:.0} % darker", self.layout.dim * 100.0));
             }
             ui.checkbox(&mut self.layout.outline, "outline").on_hover_text("a dark line under each trace, so it stands out (e.g. over the video)");
@@ -1065,21 +1155,10 @@ impl App {
         }
     }
 
-    fn traces_ui(&mut self, ui: &mut egui::Ui) {
-        let rect = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let over_video = self.video_box_ui(ui, rect);
+    /// The chart (rows, axes, cursor) in `rect`, over whatever is already painted there. `resp`
+    /// is its click/drag response; `pointer_in`: the wheel and hover act on it.
+    fn traces_ui(&mut self, ui: &mut egui::Ui, rect: Rect, resp: &egui::Response, pointer_in: bool) {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, BG);
-        if let Some(b) = self.video_box(rect) {
-            self.paint_video(&painter, b, self.layout.dim);
-            if !self.layout.locked {
-                // unlocked: show the box and its resize handle
-                painter.rect_stroke(b, 0.0, Stroke::new(1.0, MUTED), egui::StrokeKind::Outside);
-                let c = b.right_bottom();
-                painter.add(egui::Shape::convex_polygon(vec![c, c - Vec2::new(12.0, 0.0), c - Vec2::new(0.0, 12.0)], MUTED, Stroke::NONE));
-            }
-        }
         let ppp = ui.ctx().pixels_per_point();
         let x0 = rect.left() + MARGIN_X + LABEL_W + YAXIS_W;
         let x1 = rect.right() - MARGIN_X;
@@ -1196,13 +1275,13 @@ impl App {
             self.window_worker.request(need_window, t_lo - span, t_hi + span, &self.cache);
         }
         // mouse
-        // (over the unlocked floating video, which takes drags, the wheel still zooms and scales)
-        let hover_pos = resp.hover_pos().or_else(|| over_video.then(|| ui.ctx().pointer_hover_pos()).flatten());
+        // (also over a floating box in arrange mode, which takes the drags)
+        let hover_pos = if pointer_in { ui.ctx().pointer_hover_pos() } else { None };
         let hover_row = hover_pos.and_then(|p| {
             let i = ((p.y - top) / (row_h + ROW_GAP)).floor();
             (i >= 0.0 && (i as usize) < n).then_some(i as usize)
         });
-        if resp.hovered() || over_video {
+        if pointer_in {
             self.wheel(ui.ctx(), hover_row, plot_w);
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
@@ -1546,7 +1625,11 @@ impl App {
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| {
             let central = ui.max_rect();
             self.free_area = Rect::from_min_max(central.min, Pos2::new(central.right(), overview.bottom().max(central.bottom())));
-            if self.has_video() && !self.layout.overlay {
+            if self.floating() {
+                self.view_ui(ui);
+                return;
+            }
+            if self.has_video() {
                 let h = ui.available_height();
                 egui::Panel::top("video")
                     .resizable(true)
@@ -1555,7 +1638,11 @@ impl App {
                     .frame(egui::Frame::NONE.fill(Color32::BLACK))
                     .show(ui, |ui| self.video_ui(ui));
             }
-            self.traces_ui(ui);
+            let rect = ui.available_rect_before_wrap();
+            let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+            ui.painter_at(rect).rect_filled(rect, 0.0, BG);
+            let hovered = resp.hovered();
+            self.traces_ui(ui, rect, &resp, hovered);
         });
         self.dialogs_ui(&ctx);
         // (testing: SYNCVIEW_RS_TEST_EXPORT=1 opens the export dialog once the video is synced)
