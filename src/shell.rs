@@ -142,7 +142,7 @@ impl eframe::App for Shell {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         let launch = match &mut self.state {
             State::Splash(s) => {
-                if !dropped.is_empty() {
+                if !dropped.is_empty() && !s.dialog_open() {
                     s.take_paths(dropped);
                 }
                 s.ui(ui)

@@ -349,6 +349,11 @@ impl Splash {
         }
     }
 
+    /// A folder or video dialog is open.
+    pub fn dialog_open(&self) -> bool {
+        self.file_dialog.is_some()
+    }
+
     fn choose_folder(&mut self, ctx: &egui::Context) {
         if self.file_dialog.is_none() {
             let d = rfd::FileDialog::new().set_title("Open Ephys folder: a session, Record Node or recording");
@@ -373,6 +378,11 @@ impl Splash {
         self.update_thumb(&ctx);
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG)).show(ui, |ui| {
+            // the system file dialog can't be closed from here, so nothing else starts meanwhile
+            let waiting = self.dialog_open();
+            if waiting {
+                ui.disable();
+            }
             let w = 620f32.min(ui.available_width() - 32.0);
             ui.vertical_centered(|ui| {
                 ui.add_space(((ui.available_height() - 600.0) / 2.0).max(16.0));
@@ -380,6 +390,9 @@ impl Splash {
                 ui.add_space(6.0);
                 ui.label(RichText::new("syncview").size(30.0).color(LABEL));
                 ui.label(RichText::new("Open Ephys recordings, frame-locked to behaviour video").color(MUTED));
+                if waiting {
+                    ui.label(RichText::new("Choose or cancel in the file dialog to continue.").color(LABEL));
+                }
                 ui.add_space(22.0);
 
                 // drop zone
