@@ -108,7 +108,8 @@ syncview /path/to/folder          # finds the recording, video and preset inside
 can be a whole day's session, a Record Node or one recording. If it holds several recordings, a
 list opens: move with the Up and Down arrow keys and press Enter to open one. Each recording
 shows its length, channels, start time and camera triggers. If the folder holds several videos,
-a second list asks which one goes with the recording, or none. You can drop one video along with
+a second list asks which go with the recording: Enter opens the highlighted one (or none), and
+Space or the box beside each video ticks several cameras (up to 4) to open together. You can drop one video along with
 the folder, or before it (it's shown with a preview frame); dropping several videos at once is
 refused. If the video's frame count and the recording's camera triggers differ by more than 2, a
 warning says so before the viewer opens: open anyway, open without the video, or go back. A preset JSON at the top of
@@ -132,7 +133,7 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 |---|---|---|
 | `FOLDER` | | a folder to search for the recording, video and preset (above) |
 | `--rec FOLDER` | none (start page) | Open Ephys recording folder (contains `structure.oebin`) or `.nwb` file |
-| `--video FILE` | none | video recorded during this recording |
+| `--video FILE` | none | video recorded during this recording; repeat for several cameras (up to 4) |
 | `--preset FILE.json` | built from the recording | same JSON as Python syncview |
 | `--stream NAME` | `acquisition_board`, else the first stream | Open Ephys continuous stream |
 | `--trigger-line N` | `1` | TTL line with one pulse per video frame |
@@ -153,8 +154,13 @@ defaults (Python syncview keeps the old band). Click a row's number to select it
 Remove and as the template for Add. **Load…/Save…** read and write presets in the Python format
 (time base, rows, overview); **Video…** attaches a video.
 
-**Layout.** By default the video sits above the chart. **Float video** turns the video into a box
-over the chart, **Float chart** turns the chart into a box over the video, and with both on each
+**Several cameras.** Up to four videos can play together, each locked to its own TTL line (line 1,
+or `--trigger-line`, unless changed). **Videos** in the toolbar lists them, with each one's TTL
+line, Remove and Add video…; dropping a video on the window adds it. The first video sets the frame
+number, frame stepping (←/→) and clip export.
+
+**Layout.** By default the videos sit side by side above the chart. **Float video** turns each video
+into a box over the chart, **Float chart** turns the chart into a box over the video, and with both on each
 is a box of its own; the chart is always drawn on top. While the padlock is open, drag a box to
 move it and its bottom-right corner to resize it; lock it and drags pan time again (the wheel
 zooms either way). **dim** darkens the video where the chart covers it, and **outline** draws a

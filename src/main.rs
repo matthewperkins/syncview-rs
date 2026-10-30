@@ -50,9 +50,10 @@ struct Cli {
     /// (~100 MB) into DIR (default: the cache folder) on first use, then opens them
     #[arg(long, value_name = "DIR", num_args = 0..=1, conflicts_with = "rec")]
     demo: Option<Option<PathBuf>>,
-    /// video recorded during this recording (one camera)
+    /// video recorded during this recording; repeat for several cameras (up to 4, the first sets
+    /// the frame number and clip export)
     #[arg(long)]
-    video: Option<PathBuf>,
+    video: Vec<PathBuf>,
     /// channel preset JSON (same format as Python syncview); default: all electrode channels
     #[arg(long)]
     preset: Option<PathBuf>,
@@ -154,7 +155,7 @@ fn main() -> Result<()> {
     }
     ffmpeg_next::init().context("initialising FFmpeg")?;
     ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Error);
-    if let (Some(d), Some(v)) = (&cli.dump_frames, &cli.video) {
+    if let (Some(d), Some(v)) = (&cli.dump_frames, cli.video.first()) {
         let idx: Vec<usize> = d[0].split(',').map(|s| s.parse()).collect::<Result<_, _>>()?;
         return video::dump_frames(v, &idx, std::path::Path::new(&d[1]));
     }
@@ -167,9 +168,9 @@ fn main() -> Result<()> {
     if let Some(dir) = &cli.demo {
         let d = demo::ensure(dir.as_ref().unwrap_or(&root))?;
         let time = cli.time.or(Some(17.0)); // just before the first chewing bout
-        start = shell::Start::Viewer(splash::Launch { rec: d.rec, video: cli.video.clone().or(Some(d.video)), preset: cli.preset.clone().or(Some(d.preset)), time });
+        start = shell::Start::Viewer(splash::Launch { rec: d.rec, videos: if cli.video.is_empty() { vec![d.video] } else { cli.video.clone() }, preset: cli.preset.clone().or(Some(d.preset)), time });
     } else if let Some(dir) = &cli.folder {
-        start = match folder::resolve(dir, cli.video.is_none(), cli.preset.is_none()) {
+        start = match folder::resolve(dir, cli.video.is_empty(), cli.preset.is_none()) {
             Ok(f) => {
                 let show = |p: &Option<PathBuf>| p.as_ref().map_or("none".into(), |p| p.display().to_string());
                 eprintln!("syncview: recording {}", f.rec.display());
@@ -177,7 +178,7 @@ fn main() -> Result<()> {
                 eprintln!("syncview: preset {}", show(&f.preset));
                 shell::Start::Viewer(splash::Launch {
                     rec: f.rec,
-                    video: cli.video.clone().or(f.video),
+                    videos: if cli.video.is_empty() { f.video.into_iter().collect() } else { cli.video.clone() },
                     preset: cli.preset.clone().or(f.preset),
                     time: cli.time,
                 })
@@ -186,14 +187,14 @@ fn main() -> Result<()> {
             Err(_) => shell::Start::Splash(vec![dir.clone()]),
         };
     } else if let Some(rec) = &cli.rec {
-        start = shell::Start::Viewer(splash::Launch { rec: rec.clone(), video: cli.video.clone(), preset: cli.preset.clone(), time: cli.time });
+        start = shell::Start::Viewer(splash::Launch { rec: rec.clone(), videos: cli.video.clone(), preset: cli.preset.clone(), time: cli.time });
     }
     if !cli.drop.is_empty() {
         start = shell::Start::Splash(cli.drop.clone());
     }
     if let Some(out) = &cli.export_clip {
         let shell::Start::Viewer(l) = &start else { anyhow::bail!("--export-clip needs one recording (FOLDER, --rec or --demo)") };
-        let video = l.video.clone().context("--export-clip needs a video (--video, or one in FOLDER)")?;
+        let video = l.videos.first().cloned().context("--export-clip needs a video (--video, or one in FOLDER)")?;
         let (from, to) = match (cli.clip_from, cli.clip_to) {
             (Some(a), Some(b)) => (a, b),
             _ => anyhow::bail!("--export-clip needs --clip-from and --clip-to"),

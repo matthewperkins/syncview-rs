@@ -31,7 +31,7 @@ const TAXIS_H: f32 = 20.0;
 
 pub struct Options {
     pub preset: Preset,
-    pub video: Option<PathBuf>,
+    pub videos: Vec<PathBuf>,
     pub trigger_line: i64,
     pub start_time: Option<f64>,
     pub time_base: Option<f64>,
@@ -164,18 +164,12 @@ pub struct App {
     rate_i: usize,
     playing: bool,
     last_tick: Option<Instant>,
+    /// TTL line for videos added from now on (each video keeps its own).
     trigger_line: i64,
-    frames: Vec<f64>,
-    frame_period: f64,
-    frame_rows: Vec<i64>, // recording row of each frame's trigger
     export: Export,
-    video: Option<VideoDecoder>,
-    video_ready: bool,
-    video_tex: Option<egui::TextureHandle>,
-    video_size: [usize; 2],
-    video_caption: String,
-    video_msg: String,
-    want_frame: Option<usize>,
+    /// The videos shown, at most MAX_VIDEOS; the first is the reference for frame stepping, the
+    /// frame number and clip export.
+    cams: Vec<Cam>,
     edits: Vec<RowEdit>,
     selected: Option<usize>,
     last_dir: Option<PathBuf>,
@@ -190,6 +184,70 @@ pub struct App {
     layout: preset::Layout,
     /// The file dialog that is open, if any (see dialog.rs).
     file_dialog: Option<crate::dialog::Pending<FileDialog>>,
+}
+
+/// At most this many videos at once (e.g. three side views and one from above).
+const MAX_VIDEOS: usize = 4;
+
+/// One video, locked to its own TTL line: frame k is shown from the k-th trigger on.
+struct Cam {
+    dec: VideoDecoder,
+    line: i64,
+    /// Frame count, width, height and decoder, once the video has opened.
+    opened: Option<(usize, usize, usize, String)>,
+    /// Once synced: each frame's trigger time (s) and recording row, and the frame period.
+    frames: Vec<f64>,
+    rows: Vec<i64>,
+    period: f64,
+    ready: bool,
+    tex: Option<egui::TextureHandle>,
+    size: [usize; 2],
+    caption: String,
+    /// Shown instead of the frame while not empty (opening…, errors, outside the video).
+    msg: String,
+    want: Option<usize>,
+}
+
+impl Cam {
+    fn new(dec: VideoDecoder, line: i64, msg: String) -> Cam {
+        let (frames, rows, tex, caption, want) = (vec![], vec![], None, String::new(), None);
+        Cam { dec, line, opened: None, frames, rows, period: 0.02, ready: false, tex, size: [0, 0], caption, msg, want }
+    }
+
+    fn name(&self) -> String {
+        self.dec.path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    }
+
+    /// Last frame triggered at or before `t` (None outside the video).
+    fn frame_at(&self, t: f64) -> Option<usize> {
+        let last = *self.frames.last()?;
+        if t > last + self.period {
+            return None;
+        }
+        let k = self.frames.partition_point(|x| *x < t + 1e-6) as i64 - 1;
+        (k >= 0).then_some(k as usize)
+    }
+
+    /// Height / width of its frames (4:3 until the first frame arrives).
+    fn aspect(&self) -> f32 {
+        let [w, h] = self.size;
+        if w > 0 && h > 0 { h as f32 / w as f32 } else { 0.75 }
+    }
+}
+
+/// Boxes of the given aspects (height / width) side by side in `a`, each as large as its equal
+/// share of the width allows, centred in it.
+fn tile(a: Rect, aspects: &[f32]) -> Vec<Rect> {
+    let w = a.width() / aspects.len().max(1) as f32;
+    aspects
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let slot = Rect::from_min_size(Pos2::new(a.left() + i as f32 * w, a.top()), Vec2::new(w, a.height()));
+            let bw = slot.width().min(slot.height() / k);
+            Rect::from_center_size(slot.center(), Vec2::new(bw, bw * k))
+        })
+        .collect()
 }
 
 /// What an open file dialog's answer is for.
@@ -379,17 +437,8 @@ impl App {
             playing: false,
             last_tick: None,
             trigger_line: opts.trigger_line,
-            frames,
-            frame_period: 0.02,
-            frame_rows: vec![],
             export: Export::default(),
-            video: None,
-            video_ready: false,
-            video_tex: None,
-            video_size: [0, 0],
-            video_caption: String::new(),
-            video_msg: String::new(),
-            want_frame: None,
+            cams: vec![],
             edits: vec![],
             selected: None,
             last_dir: None,
@@ -409,7 +458,7 @@ impl App {
         if let Some(tb) = opts.time_base {
             app.set_span(tb);
         }
-        if let Some(v) = opts.video {
+        for v in opts.videos {
             app.attach_video(v, &ctx);
         }
         if opts.play {
@@ -492,24 +541,26 @@ impl App {
         self.span_text = fmt_span((self.span * 1000.0).round() / 1000.0);
     }
 
-    fn step_frames(&mut self, n: i64) {
-        if self.frames.is_empty() {
-            self.set_time(self.t + n as f64 * 0.02);
-            return;
-        }
-        let k = self.frames.partition_point(|x| *x < self.t + 1e-6) as i64 - 1;
-        let k = (k + n).clamp(0, self.frames.len() as i64 - 1) as usize;
-        self.set_time(self.frames[k]);
+    /// The reference video (the first), once synced.
+    fn cam0(&self) -> Option<&Cam> {
+        self.cams.first().filter(|c| c.ready)
     }
 
-    /// Last frame triggered at or before the cursor (None outside the video).
+    /// Step n frames of the reference video (n × 20 ms without one).
+    fn step_frames(&mut self, n: i64) {
+        let Some(c) = self.cam0() else {
+            self.set_time(self.t + n as f64 * 0.02);
+            return;
+        };
+        let k = c.frames.partition_point(|x| *x < self.t + 1e-6) as i64 - 1;
+        let k = (k + n).clamp(0, c.frames.len() as i64 - 1) as usize;
+        let t = c.frames[k];
+        self.set_time(t);
+    }
+
+    /// The reference video's frame at the cursor (None outside it).
     fn current_frame(&self) -> Option<usize> {
-        let last = *self.frames.last()?;
-        if self.t > last + self.frame_period {
-            return None;
-        }
-        let k = self.frames.partition_point(|x| *x < self.t + 1e-6) as i64 - 1;
-        (k >= 0).then_some(k as usize)
+        self.cam0()?.frame_at(self.t)
     }
 
     fn toggle_play(&mut self) {
@@ -532,122 +583,155 @@ impl App {
     }
 
     // ------------------------------------------------------------------ video
+    /// Show another video (up to MAX_VIDEOS), locked to the current TTL line.
     pub fn attach_video(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.cams.iter().any(|c| c.dec.path == path) {
+            self.status = format!("{} is already shown", path.display());
+            return;
+        }
+        if self.cams.len() >= MAX_VIDEOS {
+            self.dialogs.push(("Too many videos".into(), format!("syncview shows up to {MAX_VIDEOS} videos; remove one (Videos menu in the toolbar) first.")));
+            return;
+        }
         let c = ctx.clone();
-        self.video_msg = format!("opening {} …", path.file_name().unwrap_or_default().to_string_lossy());
-        self.video_ready = false;
-        self.video = Some(VideoDecoder::new(path, self.cache.root.join("video_index"), move || c.request_repaint()));
+        let msg = format!("opening {} …", path.file_name().unwrap_or_default().to_string_lossy());
+        let dec = VideoDecoder::new(path.clone(), self.cache.root.join("video_index"), move || c.request_repaint());
+        self.cams.push(Cam::new(dec, self.trigger_line, msg));
+    }
+
+    fn remove_video(&mut self, i: usize) {
+        self.cams.remove(i);
+        if i < self.layout.videos.len() {
+            self.layout.videos.remove(i);
+        }
+    }
+
+    /// Lock video i's frames to the triggers on its TTL line (again, after the line changes).
+    fn sync_cam(&mut self, i: usize) {
+        let c = &mut self.cams[i];
+        let Some((n, w, h, backend)) = c.opened.clone() else { return };
+        let name = c.name();
+        c.ready = false;
+        c.want = None;
+        match check_sync(&self.rec, n, c.line, video_duration(&c.dec.path)) {
+            Err(e) => {
+                eprintln!("syncview: sync error ({name}): {e}");
+                c.msg = format!("{name}: {e}");
+                c.frames.clear();
+                c.rows.clear();
+                self.dialogs.push(("Video sync failed".into(), format!("{name} on TTL line {}:\n\n• {e}", c.line)));
+            }
+            Ok(si) => {
+                for m in &si.issues {
+                    eprintln!("syncview: sync warning ({name}): {m}");
+                }
+                if !si.issues.is_empty() {
+                    let body = si.issues.iter().map(|m| format!("• {m}")).collect::<Vec<_>>().join("\n\n");
+                    self.dialogs.push(("Video sync warning".into(), format!("{name} on TTL line {}:\n\n{body}", c.line)));
+                }
+                c.frames = si.frames.iter().map(|i| *i as f64 / self.rec.fs).collect();
+                c.rows = si.frames;
+                c.period = si.period;
+                c.ready = true;
+                c.msg.clear();
+                let (first, last) = (c.frames[0], *c.frames.last().unwrap());
+                self.status = format!(
+                    "{name}: {n} frames {w}×{h} on TTL line {}, {} extra trigger(s) dropped; video spans {} – {}; decoder: {backend}",
+                    c.line, si.extra, fmt_time(first, None), fmt_time(last, None)
+                );
+                if i == 0 && (self.t < first || self.t > last) {
+                    self.t = first;
+                }
+            }
+        }
     }
 
     fn poll_video(&mut self, ctx: &egui::Context) {
-        let Some(v) = &self.video else { return };
-        let name = v.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        match v.take_opened() {
-            Some(Ok(info)) => {
-                match check_sync(&self.rec, info.n_frames, self.trigger_line, video_duration(&v.path)) {
-                    Err(e) => {
-                        eprintln!("syncview: sync error ({name}): {e}");
-                        self.video_msg = format!("{name}: {e}");
-                        self.dialogs.push(("Video sync failed".into(), format!("{name} on TTL line {}:\n\n• {e}", self.trigger_line)));
-                        self.video = None;
-                        return;
-                    }
-                    Ok(si) => {
-                        for m in &si.issues {
-                            eprintln!("syncview: sync warning ({name}): {m}");
-                        }
-                        if !si.issues.is_empty() {
-                            let body = si.issues.iter().map(|m| format!("• {m}")).collect::<Vec<_>>().join("\n\n");
-                            self.dialogs.push(("Video sync warning".into(), format!("{name} on TTL line {}:\n\n{body}", self.trigger_line)));
-                        }
-                        self.frames = si.frames.iter().map(|i| *i as f64 / self.rec.fs).collect();
-                        self.frame_rows = si.frames.clone();
-                        self.frame_period = si.period;
-                        self.status = format!(
-                            "{name}: {} frames {}×{}, {} extra trigger(s) dropped; video spans {} – {}; decoder: {}",
-                            info.n_frames, info.width, info.height, si.extra,
-                            fmt_time(self.frames[0], None), fmt_time(*self.frames.last().unwrap(), None), info.backend
-                        );
-                        if self.t < self.frames[0] || self.t > *self.frames.last().unwrap() {
-                            self.t = self.frames[0];
-                        }
-                        self.video_ready = true;
-                        self.want_frame = None;
-                    }
+        for i in 0..self.cams.len() {
+            match self.cams[i].dec.take_opened() {
+                Some(Ok(info)) => {
+                    self.cams[i].opened = Some((info.n_frames, info.width, info.height, info.backend));
+                    self.sync_cam(i);
                 }
-            }
-            Some(Err(msg)) => {
-                eprintln!("syncview: {msg}");
-                self.video_msg = msg;
-            }
-            None => {}
-        }
-        if let Some(f) = self.video.as_ref().and_then(|v| v.take_frame()) {
-            let img = egui::ColorImage::from_rgb([f.width, f.height], &f.rgb);
-            match &mut self.video_tex {
-                Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                None => self.video_tex = Some(ctx.load_texture("video", img, egui::TextureOptions::LINEAR)),
-            }
-            self.video_size = [f.width, f.height];
-            let trig = self.frames.get(f.index).map(|t| fmt_time(*t, None)).unwrap_or_default();
-            self.video_caption = format!("frame {}   trigger {}", f.index, trig);
-        }
-        if self.video_ready {
-            match self.current_frame() {
-                None => {
-                    self.want_frame = None;
-                    self.video_msg = "no video at this time".into();
+                Some(Err(msg)) => {
+                    eprintln!("syncview: {msg}");
+                    self.cams[i].msg = msg;
                 }
-                Some(k) => {
-                    self.video_msg.clear();
-                    if Some(k) != self.want_frame {
-                        self.want_frame = Some(k);
-                        self.video.as_ref().unwrap().request(k);
+                None => {}
+            }
+            let t = self.t;
+            let c = &mut self.cams[i];
+            if let Some(f) = c.dec.take_frame() {
+                let img = egui::ColorImage::from_rgb([f.width, f.height], &f.rgb);
+                match &mut c.tex {
+                    Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                    None => c.tex = Some(ctx.load_texture(format!("video{i}"), img, egui::TextureOptions::LINEAR)),
+                }
+                c.size = [f.width, f.height];
+                let trig = c.frames.get(f.index).map(|t| fmt_time(*t, None)).unwrap_or_default();
+                c.caption = format!("frame {}   trigger {}", f.index, trig);
+            }
+            if c.ready {
+                match c.frame_at(t) {
+                    None => {
+                        c.want = None;
+                        c.msg = "no video at this time".into();
+                    }
+                    Some(k) => {
+                        c.msg.clear();
+                        if Some(k) != c.want {
+                            c.want = Some(k);
+                            c.dec.request(k);
+                        }
                     }
                 }
             }
         }
     }
 
+    /// Stacked layout: the videos side by side, above the chart.
     fn video_ui(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, Sense::hover());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, Color32::BLACK);
-        if !self.video_msg.is_empty() || self.video_tex.is_none() {
-            let msg = if self.video_msg.is_empty() { "…" } else { &self.video_msg };
-            p.text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), MUTED);
-            return;
+        let aspects: Vec<f32> = self.cams.iter().map(Cam::aspect).collect();
+        for (i, b) in tile(rect, &aspects).into_iter().enumerate() {
+            self.paint_cam(&p, i, b);
         }
-        let [w, h] = self.video_size;
-        if w == 0 || h == 0 {
-            return;
-        }
-        let scale = (rect.width() / w as f32).min(rect.height() / h as f32);
-        let size = Vec2::new(w as f32 * scale, h as f32 * scale);
-        self.paint_video(&p, Rect::from_center_size(rect.center(), size), 0.0);
     }
 
-    /// The current frame (or a message) in `target`, darkened by `dim` (0 to 1), with its caption.
-    fn paint_video(&self, p: &egui::Painter, target: Rect, dim: f32) {
+    /// Video i's current frame (or its message) in `target`, with its caption.
+    fn paint_cam(&self, p: &egui::Painter, i: usize, target: Rect) {
+        let c = &self.cams[i];
         p.rect_filled(target, 0.0, Color32::BLACK);
-        match &self.video_tex {
-            Some(tex) if self.video_msg.is_empty() => {
+        match &c.tex {
+            Some(tex) if c.msg.is_empty() => {
                 p.image(tex.id(), target, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                if dim > 0.0 {
-                    p.rect_filled(target, 0.0, Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8));
-                }
-                p.text(target.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, &self.video_caption, FontId::monospace(11.0), LABEL);
+                p.text(target.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, &c.caption, FontId::monospace(11.0), LABEL);
             }
             _ => {
-                let msg = if self.video_msg.is_empty() { "…" } else { &self.video_msg };
+                let msg = if c.msg.is_empty() { "…" } else { &c.msg };
                 p.text(target.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), MUTED);
             }
         }
     }
 
     fn has_video(&self) -> bool {
-        self.video.is_some() || self.video_tex.is_some()
+        !self.cams.is_empty()
+    }
+
+    /// Video i's floating box, as fractions of the viewing area (see Layout::videos).
+    fn video_frac(&self, i: usize) -> [f32; 3] {
+        self.layout.videos.get(i).copied().unwrap_or(preset::VIDEO_BOXES[i.min(preset::VIDEO_BOXES.len() - 1)])
+    }
+
+    fn set_video_frac(&mut self, i: usize, f: [f32; 3]) {
+        while self.layout.videos.len() <= i {
+            let k = self.layout.videos.len();
+            self.layout.videos.push(self.video_frac(k));
+        }
+        self.layout.videos[i] = f;
     }
 
     /// Whether the video or the chart floats (otherwise the video sits above the chart).
@@ -655,26 +739,23 @@ impl App {
         (self.layout.float_video && self.has_video()) || self.layout.float_chart
     }
 
-    /// Height / width of the video frame.
-    fn video_aspect(&self) -> f32 {
-        let [w, h] = self.video_size;
-        if w > 0 && h > 0 { h as f32 / w as f32 } else { 0.75 }
-    }
-
-    /// Where the video (if any) and the chart go in the viewing area `a`: each is its floating
-    /// box, or else the video is fitted into the area and the chart fills it.
-    fn boxes(&self, a: Rect) -> (Option<Rect>, Rect) {
+    /// Where the videos and the chart go in the viewing area `a`: each is its floating box, or
+    /// else the videos are fitted side by side into the area and the chart fills it.
+    fn boxes(&self, a: Rect) -> (Vec<Rect>, Rect) {
         let l = &self.layout;
-        let k = self.video_aspect();
-        let video = if !self.has_video() {
-            None
-        } else if l.float_video {
-            let [x, y, w] = l.video;
-            let w = w * a.width();
-            Some(fit_inside(Rect::from_min_size(a.min + Vec2::new(x * a.width(), y * a.height()), Vec2::new(w, w * k)), a, Some(k)))
+        let aspects: Vec<f32> = self.cams.iter().map(Cam::aspect).collect();
+        let videos = if l.float_video {
+            aspects
+                .iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    let [x, y, w] = self.video_frac(i);
+                    let w = w * a.width();
+                    fit_inside(Rect::from_min_size(a.min + Vec2::new(x * a.width(), y * a.height()), Vec2::new(w, w * k)), a, Some(*k))
+                })
+                .collect()
         } else {
-            let w = a.width().min(a.height() / k);
-            Some(Rect::from_center_size(a.center(), Vec2::new(w, w * k)))
+            tile(a, &aspects)
         };
         let chart = if l.float_chart {
             let [x, y, w, h] = l.chart;
@@ -682,7 +763,7 @@ impl App {
         } else {
             a
         };
-        (video, chart)
+        (videos, chart)
     }
 
     /// The viewing area when the video or the chart floats. Unlocked, drags move and resize the
@@ -694,28 +775,29 @@ impl App {
         if a.width() < 60.0 || a.height() < 60.0 {
             return;
         }
-        let (video, chart) = self.boxes(a);
+        let (videos, chart) = self.boxes(a);
         let resp = ui.interact(chart, ui.id().with("chart"), Sense::click_and_drag());
         if !self.layout.locked {
             let fx = |b: Rect| (b.min.x - a.min.x) / a.width();
             let fy = |b: Rect| (b.min.y - a.min.y) / a.height();
-            if self.layout.float_video
-                && let Some(v) = video
-            {
-                let k = self.video_aspect();
-                let b = drag_box(ui, a, "video_box", v, Some(k), Vec2::new(80.0, 80.0 * k));
-                self.layout.video = [fx(b), fy(b), b.width() / a.width()];
+            if self.layout.float_video {
+                // later videos are drawn on top, so they take the drag where boxes overlap
+                for (i, v) in videos.iter().enumerate() {
+                    let k = self.cams[i].aspect();
+                    let b = drag_box(ui, a, &format!("video_box{i}"), *v, Some(k), Vec2::new(80.0, 80.0 * k));
+                    self.set_video_frac(i, [fx(b), fy(b), b.width() / a.width()]);
+                }
             }
             if self.layout.float_chart {
                 let b = drag_box(ui, a, "chart_box", chart, None, Vec2::new(240.0, 140.0));
                 self.layout.chart = [fx(b), fy(b), b.width() / a.width(), b.height() / a.height()];
             }
         }
-        let (video, chart) = self.boxes(a);
+        let (videos, chart) = self.boxes(a);
         let p = ui.painter_at(a);
         p.rect_filled(a, 0.0, BG);
-        if let Some(v) = video {
-            self.paint_video(&p, v, 0.0);
+        for (i, v) in videos.iter().enumerate() {
+            self.paint_cam(&p, i, *v);
             let under = v.intersect(chart);
             if self.layout.dim > 0.0 && under.is_positive() {
                 p.rect_filled(under, 0.0, Color32::from_black_alpha((self.layout.dim.clamp(0.0, 1.0) * 255.0) as u8));
@@ -725,9 +807,12 @@ impl App {
         self.traces_ui(ui, chart, &resp, pointer_in);
         if !self.layout.locked {
             // arrange mode: outline each floating box and mark its resize corner
-            let floating = [video.filter(|_| self.layout.float_video), self.layout.float_chart.then_some(chart)];
+            let mut floating: Vec<Rect> = if self.layout.float_video { videos } else { vec![] };
+            if self.layout.float_chart {
+                floating.push(chart);
+            }
             let p = ui.painter_at(a);
-            for b in floating.into_iter().flatten() {
+            for b in floating {
                 p.rect_stroke(b, 0.0, Stroke::new(1.0, MUTED), egui::StrokeKind::Inside);
                 let c = b.right_bottom();
                 p.add(egui::Shape::convex_polygon(vec![c, c - Vec2::new(12.0, 0.0), c - Vec2::new(0.0, 12.0)], MUTED, Stroke::NONE));
@@ -900,11 +985,8 @@ impl App {
                 }
             }
             ui.separator();
-            if ui.button("Video…").on_hover_text("attach the video recorded during this session").clicked() {
-                let ctx = ui.ctx().clone();
-                self.choose_video_dialog(&ctx);
-            }
-            let can_export = self.video_ready && self.video.is_some();
+            self.videos_menu(ui);
+            let can_export = self.cam0().is_some();
             if ui
                 .add_enabled(can_export, egui::Button::new("Export clip…"))
                 .on_hover_text("save the video with the traces scrolling underneath as an MP4")
@@ -956,6 +1038,48 @@ impl App {
         });
     }
 
+    /// The videos shown: each one's TTL line, Remove, and Add video… (up to MAX_VIDEOS).
+    fn videos_menu(&mut self, ui: &mut egui::Ui) {
+        let n = self.cams.len();
+        let title = if n == 0 { "Video…".to_string() } else { format!("Videos ({n})") };
+        let (mut remove, mut add, mut resync) = (None, false, None);
+        if n == 0 {
+            add = ui.button(title).on_hover_text("attach a video recorded during this session").clicked();
+        } else {
+            ui.menu_button(title, |ui| {
+                egui::Grid::new("videos").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
+                    for (i, c) in self.cams.iter_mut().enumerate() {
+                        ui.label(egui::RichText::new(format!("{}  {}", i + 1, c.name())).monospace());
+                        ui.label("TTL line");
+                        let r = ui.add(egui::DragValue::new(&mut c.line).range(1..=64)).on_hover_text("the line carrying this camera's one pulse per frame");
+                        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                            resync = Some(i);
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.label(egui::RichText::new("Video 1 sets the frame number, frame stepping and clip export.").small().color(MUTED));
+                if ui.add_enabled(n < MAX_VIDEOS, egui::Button::new("Add video…")).on_disabled_hover_text(format!("at most {MAX_VIDEOS} videos")).clicked() {
+                    add = true;
+                    ui.close();
+                }
+            });
+        }
+        if let Some(i) = resync {
+            self.sync_cam(i);
+        }
+        if let Some(i) = remove {
+            self.remove_video(i);
+        }
+        if add {
+            let ctx = ui.ctx().clone();
+            self.choose_video_dialog(&ctx);
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let building = *self.builder.progress.lock().unwrap();
@@ -978,7 +1102,7 @@ impl App {
     }
 
     fn preset(&self) -> Preset {
-        let layout = (self.layout != preset::Layout::default()).then_some(self.layout);
+        let layout = (self.layout != preset::Layout::default()).then(|| self.layout.clone());
         Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone(), layout }
     }
 
@@ -994,10 +1118,7 @@ impl App {
         match what {
             FileDialog::LoadPreset => self.load_preset(path),
             FileDialog::SavePreset => self.save_preset(path),
-            FileDialog::Video => {
-                self.video_tex = None;
-                self.attach_video(path, ctx);
-            }
+            FileDialog::Video => self.attach_video(path, ctx),
             FileDialog::SaveClip(plan) => {
                 if let Err(e) = self.run_export(ctx, plan, path) {
                     self.export.msg = Some((e, true));
@@ -1052,7 +1173,7 @@ impl App {
 
     fn choose_video_dialog(&mut self, ctx: &egui::Context) {
         let mut d = rfd::FileDialog::new().set_title("Video recorded during this session").add_filter("Video", &["mp4", "mkv", "mov", "avi"]);
-        if let Some(dir) = self.video.as_ref().and_then(|v| v.path.parent().map(PathBuf::from)).or(self.last_dir.clone()) {
+        if let Some(dir) = self.cams.first().and_then(|c| c.dec.path.parent().map(PathBuf::from)).or(self.last_dir.clone()) {
             d = d.set_directory(dir);
         }
         self.open_dialog(ctx, FileDialog::Video, d, false);
@@ -1461,12 +1582,19 @@ fn parse_clock(s: &str) -> Option<f64> {
 }
 
 impl App {
+    /// The reference video's first and last trigger times (the whole recording without one).
+    fn video_span(&self) -> (f64, f64) {
+        match self.cam0() {
+            Some(c) => (c.frames[0], *c.frames.last().unwrap()),
+            None => (0.0, self.rec.duration()),
+        }
+    }
+
     fn open_export(&mut self) {
+        let (first, last) = self.video_span();
         let e = &mut self.export;
         if e.run.is_none() {
             let (a, b) = (self.t - self.span / 2.0, self.t + self.span / 2.0);
-            let first = self.frames.first().copied().unwrap_or(0.0);
-            let last = self.frames.last().copied().unwrap_or(self.rec.duration());
             e.from = fmt_time(a.max(first), None);
             e.to = fmt_time(b.min(last), None);
             if e.time_base.is_empty() {
@@ -1531,8 +1659,9 @@ impl App {
                 });
                 if ui.small_button("Use the current view").clicked() {
                     let (a, b) = (self.t - self.span / 2.0, self.t + self.span / 2.0);
-                    self.export.from = fmt_time(a.max(self.frames.first().copied().unwrap_or(0.0)), None);
-                    self.export.to = fmt_time(b.min(self.frames.last().copied().unwrap_or(b)), None);
+                    let (first, last) = self.video_span();
+                    self.export.from = fmt_time(a.max(first), None);
+                    self.export.to = fmt_time(b.min(last), None);
                 }
                 ui.label(
                     egui::RichText::new(format!(
@@ -1579,7 +1708,7 @@ impl App {
         if speed <= 0.0 || time_base <= 0.0 {
             return Err("Speed and time base must be positive".into());
         }
-        let video = self.video.as_ref().map(|v| v.path.clone()).ok_or("no video")?;
+        let video = self.cam0().map(|c| c.dec.path.clone()).ok_or("no video")?;
         let stem = video.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let name = format!("{stem}_{}-{}.mp4", fmt_time(from, Some(1e9)).replace(':', "-"), fmt_time(to, Some(1e9)).replace(':', "-"));
         let mut d = rfd::FileDialog::new().set_title("Save clip").add_filter("MP4 video", &["mp4"]).set_file_name(&name);
@@ -1614,7 +1743,7 @@ impl App {
         }
         let job = crate::clip::ClipJob { out: out.clone(), video, from, to, time_base, width, speed, rows };
         let (rec, cache) = (self.rec.clone(), self.cache.clone());
-        let (frames, period) = (self.frame_rows.clone(), self.frame_period);
+        let (frames, period) = self.cam0().map(|c| (c.rows.clone(), c.period)).ok_or("no video")?;
         let index_dir = self.cache.root.join("video_index");
         let progress = Arc::new(std::sync::Mutex::new(0.0));
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1704,7 +1833,7 @@ impl App {
         });
         self.dialogs_ui(&ctx);
         // (testing: SYNCVIEW_RS_TEST_EXPORT=1 opens the export dialog once the video is synced)
-        if self.video_ready && !self.export.open && self.export.from.is_empty() && std::env::var_os("SYNCVIEW_RS_TEST_EXPORT").is_some() {
+        if self.cam0().is_some() && !self.export.open && self.export.from.is_empty() && std::env::var_os("SYNCVIEW_RS_TEST_EXPORT").is_some() {
             self.open_export();
         }
         self.export_ui(&ctx);

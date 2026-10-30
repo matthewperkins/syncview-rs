@@ -89,17 +89,36 @@ pub struct Preset {
     pub layout: Option<Layout>,
 }
 
+/// Where floating videos 1-4 start: the four quarters of the viewing area, top right first.
+pub const VIDEO_BOXES: [[f32; 3]; 4] = [[0.5, 0.0, 0.5], [0.0, 0.0, 0.5], [0.0, 0.5, 0.5], [0.5, 0.5, 0.5]];
+
+fn one_or_many_boxes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<[f32; 3]>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Boxes {
+        One([f32; 3]),
+        Many(Vec<[f32; 3]>),
+    }
+    Ok(match Boxes::deserialize(d)? {
+        Boxes::One(b) => vec![b],
+        Boxes::Many(v) => v,
+    })
+}
+
 /// How the video and traces are arranged and drawn (display only).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
     /// The video is a movable box in the viewing area instead of sitting above the chart
     /// ("overlay" in v0.2.3 presets).
     #[serde(alias = "overlay")]
     pub float_video: bool,
-    /// The floating video's left and top edges (fractions of the viewing area) and its width
-    /// (fraction of the area's width); its height follows the video's aspect ratio.
-    pub video: [f32; 3],
+    /// Each floating video's left and top edges (fractions of the viewing area) and its width
+    /// (fraction of the area's width), in the order the videos are listed; its height follows
+    /// the video's aspect ratio. A video without an entry starts at VIDEO_BOXES. (v0.2.3 and
+    /// v0.2.4 presets hold one box, as "video".)
+    #[serde(alias = "video", deserialize_with = "one_or_many_boxes")]
+    pub videos: Vec<[f32; 3]>,
     /// The chart (rows, axes and labels) is a movable box instead of filling the area.
     pub float_chart: bool,
     /// The floating chart's left, top, width and height, as fractions of the viewing area.
@@ -117,7 +136,7 @@ impl Default for Layout {
     fn default() -> Self {
         Layout {
             float_video: false,
-            video: [0.5, 0.0, 0.5],
+            videos: vec![],
             float_chart: false,
             chart: [0.0, 0.45, 0.6, 0.55],
             locked: false,
@@ -201,6 +220,11 @@ fn layout_is_optional_and_fills_in_defaults() {
     let p: Preset = serde_json::from_str(r#"{"channels": [], "layout": {"overlay": true, "dim": 0.6}}"#).unwrap();
     let l = p.layout.unwrap();
     assert!(l.float_video && !l.float_chart && l.dim == 0.6);
-    assert_eq!(l.video, Layout::default().video);
+    assert!(l.videos.is_empty());
+    // one floating video box (v0.2.3 / v0.2.4), or one per video
+    let p: Preset = serde_json::from_str(r#"{"channels": [], "layout": {"video": [0.1, 0.2, 0.3]}}"#).unwrap();
+    assert_eq!(p.layout.unwrap().videos, vec![[0.1, 0.2, 0.3]]);
+    let p: Preset = serde_json::from_str(r#"{"channels": [], "layout": {"videos": [[0.1, 0.2, 0.3], [0.5, 0.5, 0.5]]}}"#).unwrap();
+    assert_eq!(p.layout.unwrap().videos.len(), 2);
     assert!(!l.outline && l.outline_px == Layout::default().outline_px);
 }

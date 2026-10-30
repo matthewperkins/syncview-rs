@@ -102,7 +102,7 @@ impl Shell {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title(&rec)));
         let opts = app::Options {
             preset,
-            video: l.video.clone(),
+            videos: l.videos.clone(),
             trigger_line: self.settings.trigger_line,
             start_time: l.time,
             time_base: self.settings.time_base,

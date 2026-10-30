@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 /// What to open in the viewer.
 pub struct Launch {
     pub rec: PathBuf,
-    pub video: Option<PathBuf>,
+    /// Up to four; the first is the reference (frame number, stepping, clip export).
+    pub videos: Vec<PathBuf>,
     pub preset: Option<PathBuf>,
     pub time: Option<f64>,
 }
@@ -41,13 +42,38 @@ struct Picker {
     shown: Instant,
     /// Item details (duration, size, triggers…), read in the background: (item, detail).
     details: Option<Receiver<(usize, String)>>,
+    /// Video list: the videos ticked to open together (none ticked: the highlighted one).
+    checked: Vec<bool>,
 }
+
+/// Frames and triggers disagree for some videos: the message, what opens if the user goes ahead,
+/// those videos, and when it appeared.
+struct Warning {
+    text: String,
+    launch: Launch,
+    bad: Vec<PathBuf>,
+    shown: Instant,
+}
+
+/// At most this many videos open together (as in the viewer).
+const MAX_VIDEOS: usize = 4;
 
 /// How long a new list or warning ignores input: clicks and keys made while the page was still
 /// busy (reading folders) arrive late, and shouldn't land on whatever has just appeared.
 const SETTLE: Duration = Duration::from_millis(250);
 
 impl Picker {
+    /// Tick or untick video k (at most MAX_VIDEOS ticked; "No video" can't be ticked).
+    fn toggle(&mut self, k: usize) {
+        if self.items[k].path.is_none() {
+            return;
+        }
+        if !self.checked[k] && self.checked.iter().filter(|c| **c).count() >= MAX_VIDEOS {
+            return;
+        }
+        self.checked[k] = !self.checked[k];
+    }
+
     /// Shown at once, with each item's detail line filled in by a background thread.
     fn new(what: Pick, mut items: Vec<Item>, sel: usize, trigger_line: i64) -> Picker {
         let paths: Vec<(usize, PathBuf)> = items.iter().enumerate().filter_map(|(k, it)| it.path.clone().map(|p| (k, p))).collect();
@@ -63,7 +89,8 @@ impl Picker {
                 }
             }
         });
-        Picker { what, items, sel, moved: true, shown: Instant::now(), details: Some(rx) }
+        let checked = vec![false; items.len()];
+        Picker { what, items, sel, moved: true, shown: Instant::now(), details: Some(rx), checked }
     }
 }
 
@@ -71,7 +98,10 @@ pub struct Splash {
     cache_root: PathBuf,
     trigger_line: i64,
     rec: Option<PathBuf>,
+    /// The video dropped or chosen alone (shown with a preview).
     video: Option<PathBuf>,
+    /// Videos ticked together in the video list (several cameras).
+    picked: Vec<PathBuf>,
     preset: Option<PathBuf>,
     picker: Option<Picker>,
     /// Videos found with several recordings: offered once a recording is picked.
@@ -83,7 +113,7 @@ pub struct Splash {
     stream: Option<String>,
     thumb: Option<Thumb>,
     /// Frames and triggers disagree: the message, and what opens if the user goes ahead.
-    warning: Option<(String, Launch, Instant)>,
+    warning: Option<Warning>,
     /// See SETTLE (zero in tests, which send input straight away).
     settle: Duration,
     /// The folder or video dialog, while it is open (see dialog.rs).
@@ -212,6 +242,7 @@ impl Splash {
             trigger_line,
             rec: None,
             video: None,
+            picked: vec![],
             preset: None,
             picker: None,
             later_videos: None,
@@ -238,6 +269,7 @@ impl Splash {
     /// Files and folders dropped (or chosen, or given on the command line).
     pub fn take_paths(&mut self, paths: Vec<PathBuf>) {
         self.msg = None;
+        self.picked.clear();
         let videos: Vec<&PathBuf> = paths.iter().filter(|p| folder::is_video(p)).collect();
         match videos.as_slice() {
             [] => {}
@@ -309,11 +341,14 @@ impl Splash {
 
     fn go(&mut self) {
         let Some(rec) = self.rec.clone() else { return };
-        let l = Launch { rec, video: self.video.clone(), preset: self.preset.clone(), time: None };
-        if let Some(v) = &l.video
-            && let Some(w) = alignment_warning(&l.rec, v, self.stream.as_deref(), self.trigger_line)
-        {
-            self.warning = Some((w, l, Instant::now()));
+        let videos = if self.picked.is_empty() { self.video.iter().cloned().collect() } else { self.picked.clone() };
+        let l = Launch { rec, videos, preset: self.preset.clone(), time: None };
+        let warnings: Vec<(PathBuf, String)> =
+            l.videos.iter().filter_map(|v| alignment_warning(&l.rec, v, self.stream.as_deref(), self.trigger_line).map(|w| (v.clone(), w))).collect();
+        if !warnings.is_empty() {
+            let text = warnings.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("\n\n");
+            let bad = warnings.into_iter().map(|(v, _)| v).collect();
+            self.warning = Some(Warning { text, launch: l, bad, shown: Instant::now() });
             return;
         }
         self.launch = Some(l);
@@ -350,16 +385,17 @@ impl Splash {
         }
     }
 
-    fn chose(&mut self, path: Option<PathBuf>) {
+    fn chose(&mut self, paths: Vec<PathBuf>) {
         let Some(p) = self.picker.take() else { return };
         match p.what {
             Pick::Recording => {
-                self.rec = path;
+                self.rec = paths.into_iter().next();
                 let (dir, vids) = self.later_videos.take().unwrap_or_default();
                 if self.video.is_some() { self.go() } else { self.offer_videos(&dir, vids) }
             }
             Pick::Video => {
-                self.video = path;
+                self.video = None;
+                self.picked = paths;
                 self.go();
             }
         }
@@ -380,7 +416,7 @@ impl Splash {
         match rx.try_recv() {
             Ok(Ok(d)) => {
                 self.demo = None;
-                self.launch = Some(Launch { rec: d.rec, video: Some(d.video), preset: Some(d.preset), time: Some(17.0) });
+                self.launch = Some(Launch { rec: d.rec, videos: vec![d.video], preset: Some(d.preset), time: Some(17.0) });
             }
             Ok(Err(e)) => {
                 self.demo = None;
@@ -551,9 +587,9 @@ impl Splash {
 
     /// Frames and triggers disagree: open anyway, open without the video, or go back.
     fn warning_ui(&mut self, ctx: &egui::Context) {
-        let Some((text, _, shown)) = &self.warning else { return };
-        let text = text.clone();
-        let settling = settling(ctx, *shown, self.settle);
+        let Some(w) = &self.warning else { return };
+        let (text, several) = (w.text.clone(), w.bad.len() > 1);
+        let settling = settling(ctx, w.shown, self.settle);
         let (mut open, mut without, mut back) = (false, false, false);
         if !settling {
             ctx.input_mut(|i| {
@@ -570,13 +606,14 @@ impl Splash {
             if settling {
                 ui.disable();
             }
-            ui.label(RichText::new("⚠  The video and the recording may not line up").size(17.0).color(WARN_TEXT));
+            let title = if several { "⚠  These videos and the recording may not line up" } else { "⚠  The video and the recording may not line up" };
+            ui.label(RichText::new(title).size(17.0).color(WARN_TEXT));
             ui.add_space(10.0);
             ui.label(RichText::new(text).color(LABEL));
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 open |= ui.button("Open anyway").clicked();
-                without |= ui.button("Open without the video").clicked();
+                without |= ui.button(if several { "Open without these videos" } else { "Open without the video" }).clicked();
                 back |= ui.button("Back").clicked();
             });
             ui.label(RichText::new("Enter: open anyway   Esc: back").color(MUTED).size(12.0));
@@ -585,16 +622,18 @@ impl Splash {
             back = true;
         }
         if open || without {
-            let (_, mut l, _) = self.warning.take().unwrap();
+            let Warning { launch: mut l, bad, .. } = self.warning.take().unwrap();
             if without {
-                l.video = None;
+                l.videos.retain(|v| !bad.contains(v));
                 self.video = None;
+                self.picked.clear();
             }
             self.launch = Some(l);
         } else if back {
             self.warning = None;
             self.note("Drop another video for this recording, or press Open to view it without one.".into());
             self.video = None;
+            self.picked.clear();
         }
     }
 
@@ -617,7 +656,7 @@ impl Splash {
         }
         let settling = settling(ctx, p.shown, self.settle);
         let n = p.items.len();
-        let (mut chosen, mut cancel) = (false, false);
+        let (mut chosen, mut cancel, mut toggle) = (false, false, None);
         ctx.input_mut(|i| {
             if settling {
                 return;
@@ -645,12 +684,15 @@ impl Splash {
                 p.sel = 0;
                 p.moved = true;
             }
+            if p.what == Pick::Video && i.consume_key(egui::Modifiers::NONE, Key::Space) {
+                p.toggle(p.sel);
+            }
             chosen = i.consume_key(egui::Modifiers::NONE, Key::Enter);
             cancel = i.consume_key(egui::Modifiers::NONE, Key::Escape);
         });
         let title = match p.what {
             Pick::Recording => format!("{n} recordings: which one?"),
-            Pick::Video => format!("{} videos: which one goes with this recording?", n - 1),
+            Pick::Video => format!("{} videos: which go with this recording?", n - 1),
         };
         let modal = egui::Modal::new(egui::Id::new("syncview-picker")).show(ctx, |ui| {
             ui.set_width(760f32.min(ctx.content_rect().width() - 80.0));
@@ -658,7 +700,13 @@ impl Splash {
                 ui.disable();
             }
             ui.label(RichText::new(title).size(17.0).color(LABEL));
-            ui.label(RichText::new("Up / Down arrows to move, Enter to open, Esc to cancel; or double-click").color(MUTED));
+            let hint = match p.what {
+                Pick::Recording => "Up / Down arrows to move, Enter to open, Esc to cancel; or double-click".to_string(),
+                Pick::Video => format!(
+                    "Up / Down to move, Space (or the box) to tick several cameras, up to {MAX_VIDEOS}; Enter opens the ticked ones, or else the highlighted one"
+                ),
+            };
+            ui.label(RichText::new(hint).color(MUTED));
             ui.add_space(8.0);
             egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.6).show(ui, |ui| {
                 for (k, it) in p.items.iter().enumerate() {
@@ -667,16 +715,27 @@ impl Splash {
                         .fill(if selected { ACCENT.gamma_multiply(0.22) } else { Color32::TRANSPARENT })
                         .corner_radius(6.0)
                         .inner_margin(egui::Margin::symmetric(10, 6));
-                    let r = frame
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new(&it.label).color(if selected { LABEL } else { FG }).monospace());
-                            if !it.detail.is_empty() {
-                                ui.label(RichText::new(&it.detail).color(MUTED).size(12.5));
+                    let r = ui
+                        .horizontal(|ui| {
+                            if p.what == Pick::Video && it.path.is_some() {
+                                let mut on = p.checked[k];
+                                let can = on || p.checked.iter().filter(|c| **c).count() < MAX_VIDEOS;
+                                if ui.add_enabled(can, egui::Checkbox::without_text(&mut on)).changed() {
+                                    toggle = Some(k);
+                                }
                             }
+                            frame
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(RichText::new(&it.label).color(if selected { LABEL } else { FG }).monospace());
+                                    if !it.detail.is_empty() {
+                                        ui.label(RichText::new(&it.detail).color(MUTED).size(12.5));
+                                    }
+                                })
+                                .response
+                                .interact(egui::Sense::click())
                         })
-                        .response
-                        .interact(egui::Sense::click());
+                        .inner;
                     if r.clicked() {
                         p.sel = k;
                     }
@@ -703,9 +762,14 @@ impl Splash {
         if modal.should_close() && !settling {
             cancel = true;
         }
+        if let Some(k) = toggle {
+            p.toggle(k);
+        }
         if chosen {
-            let path = p.items[p.sel].path.clone();
-            self.chose(path);
+            // the ticked videos, or else the highlighted item ("No video" is none)
+            let ticked: Vec<PathBuf> = p.items.iter().zip(&p.checked).filter(|(_, c)| **c).filter_map(|(it, _)| it.path.clone()).collect();
+            let paths = if ticked.is_empty() { p.items[p.sel].path.clone().into_iter().collect() } else { ticked };
+            self.chose(paths);
         } else if cancel {
             self.picker = None;
             self.later_videos = None;
@@ -751,6 +815,34 @@ mod tests {
         let mut out = None;
         let _ = ctx.run_ui(input, |ui| out = out.take().or(s.ui(ui)));
         out
+    }
+
+    #[test]
+    fn tick_two_cameras() {
+        let dir = std::env::temp_dir().join(format!("syncview_two_cams_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        session(&dir);
+        let ctx = egui::Context::default();
+        let mut s = Splash::new(&ctx, dir.clone(), 1, None);
+        s.settle = Duration::ZERO;
+        s.take_paths(vec![dir.clone()]);
+        frame(&ctx, &mut s, &[Key::Enter]); // the first recording → the video list, a.mp4 highlighted
+        assert!(s.picker.as_ref().unwrap().what == Pick::Video);
+        // tick a.mp4, move down, tick b.mp4, open both
+        let l = frame(&ctx, &mut s, &[Key::Space])
+            .or_else(|| frame(&ctx, &mut s, &[Key::ArrowDown]))
+            .or_else(|| frame(&ctx, &mut s, &[Key::Space]))
+            .or_else(|| frame(&ctx, &mut s, &[Key::Enter]))
+            .unwrap();
+        assert_eq!(l.videos.len(), 2);
+        assert!(l.videos[0].ends_with("Movies/a.mp4") && l.videos[1].ends_with("Movies/b.mp4"));
+        // "No video" can't be ticked
+        s.take_paths(vec![dir.clone()]);
+        frame(&ctx, &mut s, &[Key::Enter]);
+        frame(&ctx, &mut s, &[Key::Home]);
+        frame(&ctx, &mut s, &[Key::Space]);
+        assert!(!s.picker.as_ref().unwrap().checked.iter().any(|c| *c));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -804,7 +896,7 @@ mod tests {
         // Down, Enter → b.mp4, and the viewer opens
         let l = frame(&ctx, &mut s, &[Key::ArrowDown]).or_else(|| frame(&ctx, &mut s, &[Key::Enter])).unwrap();
         assert!(l.rec.ends_with("experiment2/recording1"));
-        assert!(l.video.unwrap().ends_with("Movies/b.mp4"));
+        assert!(l.videos.len() == 1 && l.videos[0].ends_with("Movies/b.mp4"));
 
         // Esc cancels; "No video" opens without one
         s.take_paths(vec![dir.clone()]);
@@ -814,14 +906,14 @@ mod tests {
         s.take_paths(vec![dir.clone()]);
         frame(&ctx, &mut s, &[Key::Enter]);
         let l = frame(&ctx, &mut s, &[Key::Home]).or_else(|| frame(&ctx, &mut s, &[Key::Enter])).unwrap();
-        assert!(l.rec.ends_with("experiment1/recording1") && l.video.is_none());
+        assert!(l.rec.ends_with("experiment1/recording1") && l.videos.is_empty());
 
         // two videos dropped at once are refused; one recording folder opens straight away
         s.take_paths(vec![dir.join("Movies/a.mp4"), dir.join("Movies/b.mp4")]);
         assert!(s.msg.as_ref().unwrap().1 && s.video.is_none());
         s.take_paths(vec![dir.join("Record Node 101/experiment1")]);
         let l = frame(&ctx, &mut s, &[]).unwrap();
-        assert!(l.rec.ends_with("experiment1/recording1") && l.video.is_none());
+        assert!(l.rec.ends_with("experiment1/recording1") && l.videos.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
