@@ -21,6 +21,9 @@ pub struct Spec {
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ylim: Option<[f64; 2]>,
+    /// How far the trace may draw beyond its own row (display only).
+    #[serde(default, skip_serializing_if = "Clip::is_row")]
+    pub clip: Clip,
     /// Filter overrides (band, order, notch, plot_fs, …) and anything else in the JSON.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -30,9 +33,37 @@ fn yes() -> bool {
     true
 }
 
+/// Where a row's trace is cut off: at its row, at the edges of the chart (all rows), or nowhere
+/// (it may also draw over the video and the overview strip). Its scale is always its own row's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Clip {
+    #[default]
+    Row,
+    Chart,
+    #[serde(rename = "none")]
+    Unclipped,
+}
+
+impl Clip {
+    pub const ALL: [Clip; 3] = [Clip::Row, Clip::Chart, Clip::Unclipped];
+
+    fn is_row(&self) -> bool {
+        *self == Clip::Row
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Clip::Row => "row",
+            Clip::Chart => "chart",
+            Clip::Unclipped => "none",
+        }
+    }
+}
+
 impl Spec {
     pub fn new(ch: &str, mode: &str) -> Self {
-        Spec { ch: ch.into(), reference: None, mode: mode.into(), label: None, show: true, color: None, ylim: None, extra: Map::new() }
+        Spec { ch: ch.into(), reference: None, mode: mode.into(), label: None, show: true, color: None, ylim: None, clip: Clip::Row, extra: Map::new() }
     }
 
     pub fn title(&self) -> String {
@@ -41,7 +72,7 @@ impl Spec {
 
     /// The spec without its display-only fields (what the processed trace depends on).
     pub fn processing(&self) -> Spec {
-        Spec { label: None, show: true, color: None, ylim: None, ..self.clone() }
+        Spec { label: None, show: true, color: None, ylim: None, clip: Clip::Row, ..self.clone() }
     }
 }
 
@@ -105,4 +136,16 @@ pub fn check(mut p: Preset, rec: &Recording) -> (Preset, Vec<String>) {
         }
     }
     (p, problems)
+}
+
+#[test]
+fn clip_round_trips_and_stays_out_of_default_presets() {
+    let s: Spec = serde_json::from_str(r#"{"ch": "CH1", "mode": "hilo", "clip": "none"}"#).unwrap();
+    assert_eq!(s.clip, Clip::Unclipped);
+    assert!(s.extra.is_empty());
+    assert_eq!(serde_json::to_value(&s).unwrap()["clip"], "none");
+    // display only: the processed trace (and its cache entry) doesn't depend on it
+    assert_eq!(s.processing(), Spec::new("CH1", "hilo").processing());
+    let row = Spec::new("CH1", "hilo");
+    assert!(serde_json::to_value(&row).unwrap().get("clip").is_none());
 }

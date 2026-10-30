@@ -4,7 +4,7 @@
 use crate::cache::{CacheBuilder, Trace, TraceCache, WindowWorker};
 use crate::filters::MODES;
 use crate::oe::{check_sync, Recording};
-use crate::preset::{self, Preset, Spec};
+use crate::preset::{self, Clip, Preset, Spec};
 use crate::video::{video_duration, VideoDecoder};
 use crate::gpu::{px_for, LineStrip};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -185,6 +185,40 @@ pub struct App {
     dialogs: Vec<(String, String)>,
     was_building: bool,
     fps: Option<(Instant, Vec<f64>)>, // SYNCVIEW_RS_FPS=1: per-second frame-time report
+    /// Where unclipped traces may draw (video, chart and overview strip), from the last frame.
+    free_area: Rect,
+}
+
+/// The Clip column: a three-position slider switch (row | chart | none); click or drag a stop.
+/// True if it changed.
+fn clip_switch(ui: &mut egui::Ui, clip: &mut Clip) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 20.0), Sense::click_and_drag());
+    let stop_x = |k: usize| rect.left() + 7.0 + k as f32 * (rect.width() - 14.0) / 2.0;
+    let mut changed = false;
+    if (resp.clicked() || resp.dragged())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let k = ((p.x - stop_x(0)) / (stop_x(1) - stop_x(0))).round().clamp(0.0, 2.0) as usize;
+        if *clip != Clip::ALL[k] {
+            *clip = Clip::ALL[k];
+            changed = true;
+        }
+    }
+    let k = Clip::ALL.iter().position(|c| c == clip).unwrap_or(0);
+    let v = ui.visuals();
+    let y = rect.center().y;
+    let track = Rect::from_min_max(Pos2::new(stop_x(0) - 4.0, y - 3.0), Pos2::new(stop_x(2) + 4.0, y + 3.0));
+    let p = ui.painter();
+    p.rect_filled(track, 3.0, v.widgets.inactive.bg_fill);
+    for j in 0..3 {
+        p.circle_filled(Pos2::new(stop_x(j), y), 1.5, MUTED);
+    }
+    // the knob stands out once the trace is allowed past its row
+    let knob = if *clip == Clip::Row { FG } else { v.selection.bg_fill };
+    let r = if resp.hovered() { 6.5 } else { 6.0 };
+    p.circle(Pos2::new(stop_x(k), y), r, knob, Stroke::new(1.0, BG));
+    resp.on_hover_text(format!("clip at: {}   (row | chart | none)", clip.name()));
+    changed
 }
 
 fn hex(s: &str) -> Color32 {
@@ -310,6 +344,7 @@ impl App {
             dialogs: vec![],
             was_building: false,
             fps: std::env::var_os("SYNCVIEW_RS_FPS").map(|_| (Instant::now(), vec![])),
+            free_area: Rect::NOTHING,
             rec,
             cache,
         };
@@ -821,7 +856,7 @@ impl App {
         refs.extend(names.iter().cloned());
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("channels").striped(true).spacing([4.0, 5.0]).show(ui, |ui| {
-                for h in ["", "Show", "Label", "Ch", "Ref", "Mode", "Low Hz", "High Hz", "Notch", "DSP wzrd", "Y range"] {
+                for h in ["", "Show", "Label", "Ch", "Ref", "Mode", "Low Hz", "High Hz", "Notch", "DSP wzrd", "Y range", "Clip"] {
                     let l = ui.label(egui::RichText::new(h).small());
                     if h == "DSP wzrd" {
                         l.on_hover_text(
@@ -831,6 +866,13 @@ impl App {
                              env_lp     envelope: final low-pass, Hz (40)\n\
                              plot_fs    slow/envelope/bandpower: stored & drawn sample rate, Hz (1000/1000/10)\n\
                              win_s      bandpower: RMS window, s (30)",
+                        );
+                    } else if h == "Clip" {
+                        l.on_hover_text(
+                            "Where the trace is cut off when it leaves its Y range (its scale stays its row's):\n\
+                             row    at its own row\n\
+                             chart  at the edges of the chart, so it may cross other rows\n\
+                             none   nowhere: it may also draw over the video and the overview strip",
                         );
                     }
                 }
@@ -878,7 +920,7 @@ impl App {
                         changed = true;
                     }
                     let mut commit = false;
-                    for (buf, w) in [(&mut e.lo, 42.0), (&mut e.hi, 42.0), (&mut e.notch, 50.0), (&mut e.extra, 92.0), (&mut e.y, 76.0)] {
+                    for (buf, w) in [(&mut e.lo, 42.0), (&mut e.hi, 42.0), (&mut e.notch, 50.0), (&mut e.extra, 72.0), (&mut e.y, 66.0)] {
                         let resp = ui.add_sized([w, 20.0], egui::TextEdit::singleline(buf));
                         commit |= resp.lost_focus();
                     }
@@ -888,6 +930,7 @@ impl App {
                         *e = RowEdit::from_spec(s); // show what was understood (invalid input reverts)
                         changed |= *s != before;
                     }
+                    changed |= clip_switch(ui, &mut s.clip);
                     ui.end_row();
                 }
             });
@@ -952,6 +995,13 @@ impl App {
         let small = FontId::proportional(11.0);
         let mut xs = Vec::new();
         let mut ys = Vec::new();
+        // where traces that aren't clipped to their row may draw (always within the time axis)
+        let chart = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom));
+        let free = if self.free_area.is_positive() {
+            Rect::from_x_y_ranges(x0..=x1, self.free_area.top()..=self.free_area.bottom())
+        } else {
+            chart
+        };
         for i in 0..n {
             let r = Rect::from_min_max(Pos2::new(x0, top + i as f32 * (row_h + ROW_GAP)), Pos2::new(x1, top + i as f32 * (row_h + ROW_GAP) + row_h));
             painter.text(Pos2::new(x0 - YAXIS_W - 4.0, r.center().y), Align2::RIGHT_CENTER, self.rows[i].spec.title(), font.clone(), LABEL);
@@ -988,13 +1038,25 @@ impl App {
                     xs.clear();
                     ys.clear();
                     tr.view(t_lo - 0.01 * span, t_hi + 0.01 * span, (plot_w * ppp) as f64 * 1.02, &mut xs, &mut ys);
+                    // Drawn in `area` (the row, or more of the window), scaled to the row: y in
+                    // screen points, then in the area's normalized device coordinates.
+                    let area = match self.rows[i].spec.clip {
+                        Clip::Row => r.intersect(rect),
+                        Clip::Chart => chart,
+                        Clip::Unclipped => free,
+                    };
+                    let (r_bottom, r_h, a_top, a_h) = (r.bottom() as f64, r.height() as f64, area.top() as f64, area.height().max(1.0) as f64);
                     let points: Vec<[f32; 2]> = xs
                         .iter()
                         .zip(&ys)
-                        .map(|(x, y)| [((x - t) / (span / 2.0)) as f32, (((*y as f64 - lo) / (hi - lo)) * 2.0 - 1.0) as f32])
+                        .map(|(x, y)| {
+                            let sy = r_bottom - (*y as f64 - lo) / (hi - lo) * r_h;
+                            [((x - t) / (span / 2.0)) as f32, (1.0 - 2.0 * (sy - a_top) / a_h) as f32]
+                        })
                         .collect();
-                    let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(r, ppp) };
-                    ui.painter().with_clip_rect(r.intersect(rect)).add(egui_wgpu::Callback::new_paint_callback(r, cb));
+                    let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(area, ppp) };
+                    // the layer's own painter, so the clip can reach past this panel (video, overview)
+                    ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area).add(egui_wgpu::Callback::new_paint_callback(area, cb));
                 }
             }
         }
@@ -1371,10 +1433,12 @@ impl App {
             ui.add_space(3.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui));
+        let overview = egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui)).response.rect;
         let max_w = (ui.available_width() * 0.45).max(120.0);
-        egui::Panel::right("channels").resizable(true).default_size(700.0f32.min(max_w)).max_size(max_w).show(ui, |ui| self.channels_ui(ui));
+        egui::Panel::right("channels").resizable(true).default_size(760.0f32.min(max_w)).max_size(max_w).show(ui, |ui| self.channels_ui(ui));
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| {
+            let central = ui.max_rect();
+            self.free_area = Rect::from_min_max(central.min, Pos2::new(central.right(), overview.bottom().max(central.bottom())));
             if self.video.is_some() || self.video_tex.is_some() {
                 let h = ui.available_height();
                 egui::Panel::top("video")
