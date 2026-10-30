@@ -7,7 +7,7 @@ use crate::{demo, folder, video};
 use eframe::egui::{self, Color32, Key, RichText};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What to open in the viewer.
 pub struct Launch {
@@ -19,7 +19,7 @@ pub struct Launch {
 
 const ACCENT: Color32 = Color32::from_rgb(0x9a, 0x8c, 0xe0); // the icon's violet rim light
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Pick {
     Recording,
     Video,
@@ -37,6 +37,34 @@ struct Picker {
     items: Vec<Item>,
     sel: usize,
     moved: bool,
+    /// When it appeared (input is ignored at first; see Splash::settle).
+    shown: Instant,
+    /// Item details (duration, size, triggers…), read in the background: (item, detail).
+    details: Option<Receiver<(usize, String)>>,
+}
+
+/// How long a new list or warning ignores input: clicks and keys made while the page was still
+/// busy (reading folders) arrive late, and shouldn't land on whatever has just appeared.
+const SETTLE: Duration = Duration::from_millis(250);
+
+impl Picker {
+    /// Shown at once, with each item's detail line filled in by a background thread.
+    fn new(what: Pick, mut items: Vec<Item>, sel: usize, trigger_line: i64) -> Picker {
+        let paths: Vec<(usize, PathBuf)> = items.iter().enumerate().filter_map(|(k, it)| it.path.clone().map(|p| (k, p))).collect();
+        for (k, _) in &paths {
+            items[*k].detail = "…".into();
+        }
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            for (k, p) in paths {
+                let d = if what == Pick::Recording { describe_recording(&p, trigger_line) } else { describe_video(&p) };
+                if tx.send((k, d)).is_err() {
+                    return;
+                }
+            }
+        });
+        Picker { what, items, sel, moved: true, shown: Instant::now(), details: Some(rx) }
+    }
 }
 
 pub struct Splash {
@@ -55,7 +83,9 @@ pub struct Splash {
     stream: Option<String>,
     thumb: Option<Thumb>,
     /// Frames and triggers disagree: the message, and what opens if the user goes ahead.
-    warning: Option<(String, Launch)>,
+    warning: Option<(String, Launch, Instant)>,
+    /// See SETTLE (zero in tests, which send input straight away).
+    settle: Duration,
     /// The folder or video dialog, while it is open (see dialog.rs).
     file_dialog: Option<crate::dialog::Pending<()>>,
 }
@@ -162,6 +192,16 @@ fn describe_video(path: &Path) -> String {
     }
 }
 
+/// Whether something shown at `since` should still ignore input (see SETTLE); keeps repainting
+/// until it shouldn't.
+fn settling(ctx: &egui::Context, since: Instant, settle: Duration) -> bool {
+    let left = settle.saturating_sub(since.elapsed());
+    if !left.is_zero() {
+        ctx.request_repaint_after(left);
+    }
+    !left.is_zero()
+}
+
 impl Splash {
     pub fn new(ctx: &egui::Context, cache_root: PathBuf, trigger_line: i64, stream: Option<String>) -> Self {
         let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG).expect("built-in icon");
@@ -182,6 +222,7 @@ impl Splash {
             stream,
             thumb: None,
             warning: None,
+            settle: SETTLE,
             file_dialog: None,
         }
     }
@@ -241,8 +282,8 @@ impl Splash {
                 self.offer_videos(&dir, vids);
             }
             _ => {
-                let items = found.iter().map(|r| Item { path: Some(r.clone()), label: rel(r, &dir), detail: describe_recording(r, self.trigger_line) }).collect();
-                self.picker = Some(Picker { what: Pick::Recording, items, sel: 0, moved: true });
+                let items = found.iter().map(|r| Item { path: Some(r.clone()), label: rel(r, &dir), detail: String::new() }).collect();
+                self.picker = Some(Picker::new(Pick::Recording, items, 0, self.trigger_line));
                 self.later_videos = Some((dir.clone(), vids));
             }
         }
@@ -258,10 +299,10 @@ impl Splash {
             }
             _ => {
                 let mut items = vec![Item { path: None, label: "No video".into(), detail: String::new() }];
-                items.extend(vids.iter().map(|v| Item { path: Some(v.clone()), label: rel(v, dir), detail: describe_video(v) }));
+                items.extend(vids.iter().map(|v| Item { path: Some(v.clone()), label: rel(v, dir), detail: String::new() }));
                 // pre-select the dropped video if it's one of them, else the first video
                 let sel = self.video.as_ref().and_then(|v| vids.iter().position(|x| x == v)).map_or(1, |i| i + 1);
-                self.picker = Some(Picker { what: Pick::Video, items, sel, moved: true });
+                self.picker = Some(Picker::new(Pick::Video, items, sel, self.trigger_line));
             }
         }
     }
@@ -272,7 +313,7 @@ impl Splash {
         if let Some(v) = &l.video
             && let Some(w) = alignment_warning(&l.rec, v, self.stream.as_deref(), self.trigger_line)
         {
-            self.warning = Some((w, l));
+            self.warning = Some((w, l, Instant::now()));
             return;
         }
         self.launch = Some(l);
@@ -510,19 +551,25 @@ impl Splash {
 
     /// Frames and triggers disagree: open anyway, open without the video, or go back.
     fn warning_ui(&mut self, ctx: &egui::Context) {
-        let Some((text, _)) = &self.warning else { return };
+        let Some((text, _, shown)) = &self.warning else { return };
         let text = text.clone();
+        let settling = settling(ctx, *shown, self.settle);
         let (mut open, mut without, mut back) = (false, false, false);
-        ctx.input_mut(|i| {
-            open = i.consume_key(egui::Modifiers::NONE, Key::Enter);
-            back = i.consume_key(egui::Modifiers::NONE, Key::Escape);
-        });
+        if !settling {
+            ctx.input_mut(|i| {
+                open = i.consume_key(egui::Modifiers::NONE, Key::Enter);
+                back = i.consume_key(egui::Modifiers::NONE, Key::Escape);
+            });
+        }
         let frame = egui::Frame::popup(&ctx.global_style())
             .fill(WARN_FILL)
             .stroke(egui::Stroke::new(1.0, WARN_TEXT.gamma_multiply(0.6)))
             .inner_margin(18.0);
         let m = egui::Modal::new(egui::Id::new("syncview-sync-warning")).frame(frame).show(ctx, |ui| {
             ui.set_width(560f32.min(ctx.content_rect().width() - 80.0));
+            if settling {
+                ui.disable();
+            }
             ui.label(RichText::new("⚠  The video and the recording may not line up").size(17.0).color(WARN_TEXT));
             ui.add_space(10.0);
             ui.label(RichText::new(text).color(LABEL));
@@ -534,11 +581,11 @@ impl Splash {
             });
             ui.label(RichText::new("Enter: open anyway   Esc: back").color(MUTED).size(12.0));
         });
-        if m.should_close() {
+        if m.should_close() && !settling {
             back = true;
         }
         if open || without {
-            let (_, mut l) = self.warning.take().unwrap();
+            let (_, mut l, _) = self.warning.take().unwrap();
             if without {
                 l.video = None;
                 self.video = None;
@@ -553,9 +600,28 @@ impl Splash {
 
     fn picker_ui(&mut self, ctx: &egui::Context) {
         let Some(p) = &mut self.picker else { return };
+        if let Some(rx) = &p.details {
+            loop {
+                match rx.try_recv() {
+                    Ok((k, d)) => p.items[k].detail = d,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        p.details = None;
+                        break;
+                    }
+                }
+            }
+        }
+        let settling = settling(ctx, p.shown, self.settle);
         let n = p.items.len();
         let (mut chosen, mut cancel) = (false, false);
         ctx.input_mut(|i| {
+            if settling {
+                return;
+            }
             // in the order pressed, several per frame when keys repeat fast
             for e in std::mem::take(&mut i.events) {
                 let step: i64 = match &e {
@@ -588,6 +654,9 @@ impl Splash {
         };
         let modal = egui::Modal::new(egui::Id::new("syncview-picker")).show(ctx, |ui| {
             ui.set_width(760f32.min(ctx.content_rect().width() - 80.0));
+            if settling {
+                ui.disable();
+            }
             ui.label(RichText::new(title).size(17.0).color(LABEL));
             ui.label(RichText::new("Up / Down arrows to move, Enter to open, Esc to cancel; or double-click").color(MUTED));
             ui.add_space(8.0);
@@ -631,7 +700,7 @@ impl Splash {
                 }
             });
         });
-        if modal.should_close() {
+        if modal.should_close() && !settling {
             cancel = true;
         }
         if chosen {
@@ -685,15 +754,39 @@ mod tests {
     }
 
     #[test]
+    fn a_new_list_ignores_input_at_first() {
+        let dir = std::env::temp_dir().join(format!("syncview_settle_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        session(&dir);
+        let ctx = egui::Context::default();
+        let mut s = Splash::new(&ctx, dir.clone(), 1, None);
+        s.take_paths(vec![dir.clone()]);
+        // an Enter that was queued while the folder was being read
+        frame(&ctx, &mut s, &[Key::Enter]);
+        assert!(s.picker.as_ref().unwrap().what == Pick::Recording);
+        std::thread::sleep(SETTLE + Duration::from_millis(50));
+        frame(&ctx, &mut s, &[Key::Enter]);
+        assert!(s.picker.as_ref().unwrap().what == Pick::Video);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn pick_recording_then_video_with_keys() {
         let dir = std::env::temp_dir().join(format!("syncview_splash_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         session(&dir);
         let ctx = egui::Context::default();
         let mut s = Splash::new(&ctx, dir.clone(), 1, None);
+        s.settle = Duration::ZERO;
 
         s.take_paths(vec![dir.clone()]);
         assert!(frame(&ctx, &mut s, &[]).is_none());
+        // the details arrive from a background thread
+        let t0 = Instant::now();
+        while s.picker.as_ref().unwrap().details.is_some() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+            frame(&ctx, &mut s, &[]);
+        }
         let p = s.picker.as_ref().unwrap();
         assert!(p.what == Pick::Recording && p.items.len() == 2);
         assert_eq!(p.items[1].label, "Record Node 101/experiment2/recording1");
