@@ -1,7 +1,7 @@
 # Build syncview for macOS (Apple silicon) and Windows (x64), with FFmpeg compiled in.
 #
 # - Push a tag like v0.1.3: builds both, creates the GitHub release if it doesn't exist, and
-#   attaches syncview-macos-arm64.zip and syncview-windows-x64.zip.
+#   attaches syncview-macos-arm64.zip (syncview.app) and syncview-windows-x64.zip (syncview.exe).
 # - Actions tab -> "Release binaries" -> Run workflow: builds both and keeps the zips as
 #   workflow artifacts (no release), for testing.
 name: Release binaries
@@ -128,14 +128,34 @@ jobs:
           path: clip-test
           if-no-files-found: warn
 
+      # macOS ships syncview.app (the binary, Info.plist with Cargo.toml's version, and an .icns
+      # made from assets/icon.png), ad-hoc signed; Windows ships the exe (icon embedded by build.rs).
       - name: Package
         shell: bash
         run: |
-          cd target/release
           if [ "$RUNNER_OS" = macOS ]; then
-            ditto -c -k syncview "$GITHUB_WORKSPACE/${{ matrix.asset }}"
+            ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+            app=target/release/syncview.app
+            rm -rf "$app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cp target/release/syncview "$app/Contents/MacOS/"
+            sed "s/VERSION/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+            plutil -lint "$app/Contents/Info.plist"
+            set="$RUNNER_TEMP/syncview.iconset"
+            mkdir -p "$set"
+            for s in 16 32 128 256 512; do
+              sips -z $s $s assets/icon.png --out "$set/icon_${s}x${s}.png" >/dev/null
+              if [ $((s * 2)) -le 512 ]; then
+                sips -z $((s * 2)) $((s * 2)) assets/icon.png --out "$set/icon_${s}x${s}@2x.png" >/dev/null
+              fi
+            done
+            iconutil -c icns "$set" -o "$app/Contents/Resources/syncview.icns"
+            codesign --force -s - "$app"
+            codesign --verify --strict --verbose=2 "$app"
+            "$app/Contents/MacOS/syncview" --version
+            (cd target/release && ditto -c -k --keepParent syncview.app "$GITHUB_WORKSPACE/${{ matrix.asset }}")
           else
-            7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" syncview.exe
+            (cd target/release && 7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" syncview.exe)
           fi
       - uses: actions/upload-artifact@v4
         with:

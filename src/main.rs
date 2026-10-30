@@ -8,6 +8,7 @@ mod app;
 mod cache;
 mod clip;
 mod demo;
+mod desktop;
 mod filters;
 mod folder;
 mod gpu;
@@ -74,6 +75,10 @@ struct Cli {
     /// start playing (playback speed with [ and ])
     #[arg(long)]
     play: bool,
+    /// Linux: add syncview to your application launcher (writes ~/.local/share/applications/syncview.desktop
+    /// and its icon), then exit
+    #[arg(long)]
+    install_desktop: bool,
     /// (testing) save a screenshot (PPM) after SECONDS and quit: --screenshot out.ppm --screenshot-after 5
     #[arg(long, hide = true)]
     screenshot: Option<PathBuf>,
@@ -143,6 +148,9 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     attach_console();
     let cli = Cli::parse();
+    if cli.install_desktop {
+        return desktop::install();
+    }
     ffmpeg_next::init().context("initialising FFmpeg")?;
     ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Error);
     if let (Some(d), Some(v)) = (&cli.dump_frames, &cli.video) {

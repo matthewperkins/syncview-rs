@@ -27,19 +27,29 @@ export. It reads the same recordings and presets (and NWB recordings too).
 ```bash
 cd ~/Downloads
 curl -L -O https://github.com/matthewperkins/syncview-rs/releases/latest/download/syncview-macos-arm64.zip
-unzip -o syncview-macos-arm64.zip syncview
-./syncview --demo
+unzip -o syncview-macos-arm64.zip
+mv syncview.app /Applications/
 ```
 
-To run it from any folder, move it onto your PATH: `sudo mv syncview /usr/local/bin/`. The build is
-not signed with an Apple Developer ID. A file downloaded with `curl` isn't marked as quarantined,
-so macOS runs it straight away. If you download the zip with a browser instead, clear the flag once
-with `xattr -d com.apple.quarantine syncview`, or use System Settings → Privacy & Security →
-Open Anyway.
+Then open syncview from Launchpad, Spotlight or the Applications folder (drag it to the Dock to keep
+it there). The command-line program is inside the app; to type `syncview` in Terminal, link it
+onto your PATH once:
+
+```bash
+sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/syncview.app/Contents/MacOS/syncview /usr/local/bin/syncview
+syncview --demo
+```
+
+The app is not signed with an Apple Developer ID. A file downloaded with `curl` isn't marked as
+quarantined, so macOS opens it straight away. If you download the zip with a browser instead,
+macOS refuses the first launch: clear the flag once with
+`xattr -dr com.apple.quarantine /Applications/syncview.app`, or use System Settings → Privacy &
+Security → Open Anyway.
 
 **Prebuilt (Windows, x64).** Download `syncview-windows-x64.zip` from the
 [latest release](https://github.com/matthewperkins/syncview-rs/releases/latest), unzip it and
-double-click `syncview.exe`, or run it from PowerShell (`.\syncview.exe --demo`). The build is
+double-click `syncview.exe` (right-click → *Pin to Start* to keep it in the Start menu), or run it
+from PowerShell (`.\syncview.exe --demo`). The build is
 not code-signed, so the first time Windows shows "Windows protected your PC": click *More info* →
 *Run anyway*. Linux and Intel Macs build from source as below.
 
@@ -62,7 +72,9 @@ That builds and installs the `syncview` command into `~/.cargo/bin` (add it to y
 shell doesn't find it). The first build takes about 5–10 minutes, most of it compiling FFmpeg. To
 update, run the same command again.
 
-On Linux the same command works; x86-64 also needs `nasm` (e.g. `sudo pacman -S nasm`).
+On Linux the same command works; x86-64 also needs `nasm` (e.g. `sudo pacman -S nasm`). Then
+`syncview --install-desktop` adds it to your application launcher, with its icon (it writes
+`~/.local/share/applications/syncview.desktop`; run it again if the program moves).
 
 **Building against the system's FFmpeg instead** (faster first build, but it has to be rebuilt
 whenever the system's FFmpeg changes major version): install FFmpeg's libraries and `pkgconf`
