@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             asset: syncview-macos-arm64.zip
           - os: windows-latest
             asset: syncview-windows-x64.zip
