@@ -187,6 +187,7 @@ pub struct App {
     fps: Option<(Instant, Vec<f64>)>, // SYNCVIEW_RS_FPS=1: per-second frame-time report
     /// Where unclipped traces may draw (video, chart and overview strip), from the last frame.
     free_area: Rect,
+    layout: preset::Layout,
 }
 
 /// The Clip column: a three-position slider switch (row | chart | none); click or drag a stop.
@@ -345,6 +346,7 @@ impl App {
             was_building: false,
             fps: std::env::var_os("SYNCVIEW_RS_FPS").map(|_| (Instant::now(), vec![])),
             free_area: Rect::NOTHING,
+            layout: preset::Layout::default(),
             rec,
             cache,
         };
@@ -375,6 +377,9 @@ impl App {
             self.dialogs.push(("Channel preset doesn't match this recording".into(), body));
         }
         self.set_span(p.time_base.unwrap_or(self.span));
+        if let Some(l) = p.layout {
+            self.layout = l;
+        }
         self.overview = p.overview;
         self.specs = p.channels;
         self.selected = None;
@@ -559,13 +564,75 @@ impl App {
             p.text(rect.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), MUTED);
             return;
         }
-        let tex = self.video_tex.as_ref().unwrap();
         let [w, h] = self.video_size;
+        if w == 0 || h == 0 {
+            return;
+        }
         let scale = (rect.width() / w as f32).min(rect.height() / h as f32);
         let size = Vec2::new(w as f32 * scale, h as f32 * scale);
-        let target = Rect::from_center_size(rect.center(), size);
-        p.image(tex.id(), target, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        p.text(target.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, &self.video_caption, FontId::monospace(11.0), LABEL);
+        self.paint_video(&p, Rect::from_center_size(rect.center(), size), 0.0);
+    }
+
+    /// The current frame (or a message) in `target`, darkened by `dim` (0 to 1), with its caption.
+    fn paint_video(&self, p: &egui::Painter, target: Rect, dim: f32) {
+        p.rect_filled(target, 0.0, Color32::BLACK);
+        match &self.video_tex {
+            Some(tex) if self.video_msg.is_empty() => {
+                p.image(tex.id(), target, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                if dim > 0.0 {
+                    p.rect_filled(target, 0.0, Color32::from_black_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8));
+                }
+                p.text(target.left_bottom() + Vec2::new(8.0, -6.0), Align2::LEFT_BOTTOM, &self.video_caption, FontId::monospace(11.0), LABEL);
+            }
+            _ => {
+                let msg = if self.video_msg.is_empty() { "…" } else { &self.video_msg };
+                p.text(target.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), MUTED);
+            }
+        }
+    }
+
+    fn has_video(&self) -> bool {
+        self.video.is_some() || self.video_tex.is_some()
+    }
+
+    /// Overlay mode: the floating video's rect in the trace area, or None if there is no video.
+    fn video_box(&self, area: Rect) -> Option<Rect> {
+        if !self.layout.overlay || !self.has_video() {
+            return None;
+        }
+        let [w, h] = self.video_size;
+        let aspect = if w > 0 && h > 0 { h as f32 / w as f32 } else { 0.75 };
+        let [fx, fy, fw] = self.layout.video;
+        let width = fw * area.width();
+        Some(Rect::from_min_size(area.min + Vec2::new(fx * area.width(), fy * area.height()), Vec2::new(width, width * aspect)))
+    }
+
+    /// Overlay mode, unlocked: drag the video to move it, its corner handle to resize it.
+    /// Registered after the trace area's own response, so it takes the drag where they overlap.
+    /// True if the pointer is over it.
+    fn video_box_ui(&mut self, ui: &mut egui::Ui, area: Rect) -> bool {
+        let Some(b) = self.video_box(area) else { return false };
+        if self.layout.locked {
+            return false;
+        }
+        let handle = Rect::from_center_size(b.right_bottom(), Vec2::splat(16.0));
+        let mv = ui.interact(b, ui.id().with("video_move"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+        let rs = ui.interact(handle, ui.id().with("video_resize"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+        let (aw, ah) = (area.width().max(1.0), area.height().max(1.0));
+        let [mut fx, mut fy, mut fw] = self.layout.video;
+        if rs.dragged() {
+            fw = ((b.width() + rs.drag_delta().x) / aw).clamp(80.0 / aw, 1.5);
+        } else if mv.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            fx += mv.drag_delta().x / aw;
+            fy += mv.drag_delta().y / ah;
+        }
+        // keep at least 40 points of it inside the area
+        let (bw, bh) = (fw * aw, b.height() * fw * aw / b.width().max(1.0));
+        fx = fx.clamp((40.0 - bw) / aw, 1.0 - 40.0 / aw);
+        fy = fy.clamp((40.0 - bh) / ah, 1.0 - 40.0 / ah);
+        self.layout.video = [fx, fy, fw];
+        mv.hovered() || rs.hovered()
     }
 
     // ------------------------------------------------------------------ data
@@ -747,6 +814,32 @@ impl App {
                 self.open_export();
             }
             ui.separator();
+            let has_video = self.has_video();
+            if ui
+                .add_enabled(has_video, egui::Button::selectable(self.layout.overlay, "Overlay"))
+                .on_hover_text("float the video behind the traces; drag it to move it, its corner to resize it")
+                .on_disabled_hover_text("attach a video first")
+                .clicked()
+            {
+                self.layout.overlay = !self.layout.overlay;
+            }
+            if self.layout.overlay && has_video {
+                let lock = if self.layout.locked { "🔒" } else { "🔓" };
+                if ui.add(egui::Button::selectable(self.layout.locked, lock))
+                    .on_hover_text(if self.layout.locked { "video locked: drags pan time (click to unlock)" } else { "lock the video in place, so drags pan time" })
+                    .clicked()
+                {
+                    self.layout.locked = !self.layout.locked;
+                }
+                ui.label("dim").on_hover_text("darken the video under the traces");
+                ui.add(egui::Slider::new(&mut self.layout.dim, 0.0..=0.9).show_value(false)).on_hover_text(format!("{:.0} % darker", self.layout.dim * 100.0));
+            }
+            ui.checkbox(&mut self.layout.outline, "outline").on_hover_text("a dark line under each trace, so it stands out (e.g. over the video)");
+            if self.layout.outline {
+                ui.add(egui::DragValue::new(&mut self.layout.outline_px).range(0.5..=4.0).speed(0.05).max_decimals(1).suffix(" px"))
+                    .on_hover_text("how far the outline extends beyond the trace on each side");
+            }
+            ui.separator();
             let fr = self.current_frame().map(|k| format!("   frame {k}")).unwrap_or_default();
             ui.label(egui::RichText::new(format!("t = {}  ({:.3} s){fr}", fmt_time(self.t, None), self.t)).monospace().size(13.0));
         });
@@ -774,7 +867,8 @@ impl App {
     }
 
     fn preset(&self) -> Preset {
-        Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone() }
+        let layout = (self.layout != preset::Layout::default()).then_some(self.layout);
+        Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone(), layout }
     }
 
     fn load_preset_dialog(&mut self) {
@@ -974,8 +1068,18 @@ impl App {
     fn traces_ui(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        let over_video = self.video_box_ui(ui, rect);
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, BG);
+        if let Some(b) = self.video_box(rect) {
+            self.paint_video(&painter, b, self.layout.dim);
+            if !self.layout.locked {
+                // unlocked: show the box and its resize handle
+                painter.rect_stroke(b, 0.0, Stroke::new(1.0, MUTED), egui::StrokeKind::Outside);
+                let c = b.right_bottom();
+                painter.add(egui::Shape::convex_polygon(vec![c, c - Vec2::new(12.0, 0.0), c - Vec2::new(0.0, 12.0)], MUTED, Stroke::NONE));
+            }
+        }
         let ppp = ui.ctx().pixels_per_point();
         let x0 = rect.left() + MARGIN_X + LABEL_W + YAXIS_W;
         let x1 = rect.right() - MARGIN_X;
@@ -1054,7 +1158,8 @@ impl App {
                             [((x - t) / (span / 2.0)) as f32, (1.0 - 2.0 * (sy - a_top) / a_h) as f32]
                         })
                         .collect();
-                    let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(area, ppp) };
+                    let outline = self.layout.outline.then_some(self.layout.outline_px);
+                    let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(area, ppp), outline };
                     // the layer's own painter, so the clip can reach past this panel (video, overview)
                     ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area).add(egui_wgpu::Callback::new_paint_callback(area, cb));
                 }
@@ -1091,11 +1196,13 @@ impl App {
             self.window_worker.request(need_window, t_lo - span, t_hi + span, &self.cache);
         }
         // mouse
-        let hover_row = resp.hover_pos().and_then(|p| {
+        // (over the unlocked floating video, which takes drags, the wheel still zooms and scales)
+        let hover_pos = resp.hover_pos().or_else(|| over_video.then(|| ui.ctx().pointer_hover_pos()).flatten());
+        let hover_row = hover_pos.and_then(|p| {
             let i = ((p.y - top) / (row_h + ROW_GAP)).floor();
             (i >= 0.0 && (i as usize) < n).then_some(i as usize)
         });
-        if resp.hovered() {
+        if resp.hovered() || over_video {
             self.wheel(ui.ctx(), hover_row, plot_w);
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
@@ -1141,7 +1248,7 @@ impl App {
                         .zip(&ys)
                         .map(|(x, y)| [((x / dur) * 2.0 - 1.0) as f32, (((*y as f64 - lo) / (hi - lo)) * 2.0 - 1.0) as f32])
                         .collect();
-                    let cb = LineStrip { slot: OVERVIEW_SLOT, points, color: FG, px: px_for(plot, ppp) };
+                    let cb = LineStrip { slot: OVERVIEW_SLOT, points, color: FG, px: px_for(plot, ppp), outline: None };
                     ui.painter().with_clip_rect(plot).add(egui_wgpu::Callback::new_paint_callback(plot, cb));
                     // a few y labels
                     let target = (hi - lo) / 2.0;
@@ -1439,7 +1546,7 @@ impl App {
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| {
             let central = ui.max_rect();
             self.free_area = Rect::from_min_max(central.min, Pos2::new(central.right(), overview.bottom().max(central.bottom())));
-            if self.video.is_some() || self.video_tex.is_some() {
+            if self.has_video() && !self.layout.overlay {
                 let h = ui.available_height();
                 egui::Panel::top("video")
                     .resizable(true)
@@ -1518,7 +1625,7 @@ mod tests {
 
     #[test]
     fn preset_json_shape() {
-        let p = Preset { time_base: Some(30.0), channels: vec![spec(), Spec::new("CH1", "slow")], overview: None };
+        let p = Preset { time_base: Some(30.0), channels: vec![spec(), Spec::new("CH1", "slow")], overview: None, layout: None };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["channels"][0]["ref"], "CH6");
         assert_eq!(v["channels"][0]["band"], json!([100.0, 3000.0]));

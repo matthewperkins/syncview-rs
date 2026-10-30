@@ -48,9 +48,11 @@ struct Uniforms {
 struct Slot {
     points: wgpu::Buffer,
     cap: u64,
-    uniforms: wgpu::Buffer,
-    bind: wgpu::BindGroup,
+    /// The line's uniforms, and the outline's (drawn first, wider and dark).
+    uniforms: [wgpu::Buffer; 2],
+    bind: [wgpu::BindGroup; 2],
     n: u32,
+    outline: bool,
 }
 
 pub struct LineResources {
@@ -147,7 +149,12 @@ pub struct LineStrip {
     pub color: egui::Color32,
     /// One physical pixel in the NDC of the callback's rect (from `px_for`).
     pub px: [f32; 2],
+    /// Draw a dark line under the trace first, this many logical pixels wider on each side.
+    pub outline: Option<f32>,
 }
+
+/// The outline's colour: near-black, slightly see-through.
+const OUTLINE: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 230);
 
 impl egui_wgpu::CallbackTrait for LineStrip {
     fn prepare(
@@ -159,7 +166,10 @@ impl egui_wgpu::CallbackTrait for LineStrip {
         res: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(r) = res.get_mut::<LineResources>() else { return vec![] };
-        let u = Uniforms { color: rgba(self.color, r.srgb), px: self.px, half: width_px(sd.pixels_per_point) / 2.0, pad: 0.0 };
+        let half = width_px(sd.pixels_per_point) / 2.0;
+        let u = Uniforms { color: rgba(self.color, r.srgb), px: self.px, half, pad: 0.0 };
+        let halo = self.outline.map(|w| w * sd.pixels_per_point).unwrap_or(0.0);
+        let uo = Uniforms { color: rgba(OUTLINE, r.srgb), px: self.px, half: half + halo, pad: 0.0 };
         let bytes: &[u8] = bytemuck::cast_slice(&self.points);
         if r.slots.len() <= self.slot {
             r.slots.resize_with(self.slot + 1, || None);
@@ -169,17 +179,21 @@ impl egui_wgpu::CallbackTrait for LineStrip {
         if slot.as_ref().is_none_or(|s| s.cap < need) {
             let uniforms = match slot.take() {
                 Some(s) => s.uniforms,
-                None => device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("trace uniforms"),
-                    size: std::mem::size_of::<Uniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
+                None => [0, 1].map(|_| {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("trace uniforms"),
+                        size: std::mem::size_of::<Uniforms>() as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    })
                 }),
             };
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("trace uniforms"),
-                layout: &r.layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+            let bind = [0, 1].map(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("trace uniforms"),
+                    layout: &r.layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms[i].as_entire_binding() }],
+                })
             });
             *slot = Some(Slot {
                 points: device.create_buffer(&wgpu::BufferDescriptor {
@@ -192,14 +206,17 @@ impl egui_wgpu::CallbackTrait for LineStrip {
                 uniforms,
                 bind,
                 n: 0,
+                outline: false,
             });
         }
         let s = slot.as_mut().unwrap();
         if !bytes.is_empty() {
             queue.write_buffer(&s.points, 0, bytes);
         }
-        queue.write_buffer(&s.uniforms, 0, bytemuck::bytes_of(&u));
+        queue.write_buffer(&s.uniforms[0], 0, bytemuck::bytes_of(&u));
+        queue.write_buffer(&s.uniforms[1], 0, bytemuck::bytes_of(&uo));
         s.n = self.points.len() as u32;
+        s.outline = self.outline.is_some();
         vec![]
     }
 
@@ -210,10 +227,12 @@ impl egui_wgpu::CallbackTrait for LineStrip {
             return;
         }
         pass.set_pipeline(&r.pipeline);
-        pass.set_bind_group(0, &s.bind, &[]);
         pass.set_vertex_buffer(0, s.points.slice(..));
         pass.set_vertex_buffer(1, s.points.slice(8..));
-        pass.draw(0..6, 0..s.n - 1);
+        for i in if s.outline { [1, 0].as_slice() } else { [0].as_slice() } {
+            pass.set_bind_group(0, &s.bind[*i], &[]);
+            pass.draw(0..6, 0..s.n - 1);
+        }
     }
 }
 

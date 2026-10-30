@@ -84,6 +84,33 @@ pub struct Preset {
     pub channels: Vec<Spec>,
     #[serde(default)]
     pub overview: Option<Spec>,
+    /// Video placement and trace styling (absent = stacked, no outline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
+}
+
+/// How the video and traces are arranged and drawn (display only).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Layout {
+    /// The video floats behind the trace rows instead of sitting above them.
+    pub overlay: bool,
+    /// The floating video's left and top edges (fractions of the trace area) and its width
+    /// (fraction of the area's width); its height follows the video's aspect ratio.
+    pub video: [f32; 3],
+    /// Drags pan time instead of moving the video.
+    pub locked: bool,
+    /// How much the floating video is darkened, 0 to 0.9.
+    pub dim: f32,
+    /// A dark line under each trace, extending outline_px beyond it on each side.
+    pub outline: bool,
+    pub outline_px: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Layout { overlay: false, video: [0.5, 0.0, 0.5], locked: false, dim: 0.4, outline: false, outline_px: 1.5 }
+    }
 }
 
 /// Default preset: every electrode channel (Open Ephys type 0 / uV; ADC and AUX skipped), labelled by
@@ -101,7 +128,7 @@ pub fn from_recording(rec: &Recording) -> Preset {
         .enumerate()
         .map(|(i, n)| Spec { label: Some((*n).clone()), show: i < MAX_SHOWN, ..Spec::new(n, "hilo") })
         .collect();
-    Preset { time_base: Some(10.0), channels, overview: None }
+    Preset { time_base: Some(10.0), channels, overview: None, layout: None }
 }
 
 /// Drop rows (and the overview) that refer to channels or modes this recording doesn't have.
@@ -148,4 +175,16 @@ fn clip_round_trips_and_stays_out_of_default_presets() {
     assert_eq!(s.processing(), Spec::new("CH1", "hilo").processing());
     let row = Spec::new("CH1", "hilo");
     assert!(serde_json::to_value(&row).unwrap().get("clip").is_none());
+}
+
+#[test]
+fn layout_is_optional_and_fills_in_defaults() {
+    let p: Preset = serde_json::from_str(r#"{"channels": []}"#).unwrap();
+    assert!(p.layout.is_none());
+    assert!(serde_json::to_value(&p).unwrap().get("layout").is_none());
+    let p: Preset = serde_json::from_str(r#"{"channels": [], "layout": {"overlay": true, "dim": 0.6}}"#).unwrap();
+    let l = p.layout.unwrap();
+    assert!(l.overlay && l.dim == 0.6);
+    assert_eq!(l.video, Layout::default().video);
+    assert!(!l.outline && l.outline_px == Layout::default().outline_px);
 }
