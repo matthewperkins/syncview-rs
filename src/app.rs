@@ -188,6 +188,26 @@ pub struct App {
     /// Where unclipped traces may draw (video, chart and overview strip), from the last frame.
     free_area: Rect,
     layout: preset::Layout,
+    /// The file dialog that is open, if any (see dialog.rs).
+    file_dialog: Option<crate::dialog::Pending<FileDialog>>,
+}
+
+/// What an open file dialog's answer is for.
+enum FileDialog {
+    LoadPreset,
+    SavePreset,
+    Video,
+    SaveClip(ClipPlan),
+}
+
+/// A clip export whose settings have been checked, waiting for where to save it.
+struct ClipPlan {
+    video: PathBuf,
+    from: f64,
+    to: f64,
+    time_base: f64,
+    width: Option<u32>,
+    speed: f64,
 }
 
 /// `b` moved (and shrunk if need be) to lie inside `a`; `aspect` (height / width) is kept.
@@ -381,6 +401,7 @@ impl App {
             fps: std::env::var_os("SYNCVIEW_RS_FPS").map(|_| (Instant::now(), vec![])),
             free_area: Rect::NOTHING,
             layout: preset::Layout::default(),
+            file_dialog: None,
             rec,
             cache,
         };
@@ -961,12 +982,39 @@ impl App {
         Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone(), layout }
     }
 
-    fn load_preset_dialog(&mut self) {
+    /// Open a file dialog (unless one is already open); its answer arrives in `dialog_answered`.
+    fn open_dialog(&mut self, ctx: &egui::Context, what: FileDialog, d: rfd::FileDialog, save: bool) {
+        if self.file_dialog.is_none() {
+            self.file_dialog = Some(crate::dialog::open(ctx, what, move || if save { d.save_file() } else { d.pick_file() }));
+        }
+    }
+
+    fn dialog_answered(&mut self, ctx: &egui::Context, what: FileDialog, path: Option<PathBuf>) {
+        let Some(path) = path else { return };
+        match what {
+            FileDialog::LoadPreset => self.load_preset(path),
+            FileDialog::SavePreset => self.save_preset(path),
+            FileDialog::Video => {
+                self.video_tex = None;
+                self.attach_video(path, ctx);
+            }
+            FileDialog::SaveClip(plan) => {
+                if let Err(e) = self.run_export(ctx, plan, path) {
+                    self.export.msg = Some((e, true));
+                }
+            }
+        }
+    }
+
+    fn load_preset_dialog(&mut self, ctx: &egui::Context) {
         let mut d = rfd::FileDialog::new().set_title("Load channel preset").add_filter("JSON", &["json"]);
         if let Some(dir) = &self.last_dir {
             d = d.set_directory(dir);
         }
-        let Some(path) = d.pick_file() else { return };
+        self.open_dialog(ctx, FileDialog::LoadPreset, d, false);
+    }
+
+    fn load_preset(&mut self, path: PathBuf) {
         self.last_dir = path.parent().map(PathBuf::from);
         let parsed = std::fs::read_to_string(&path)
             .map_err(anyhow::Error::from)
@@ -981,12 +1029,15 @@ impl App {
         }
     }
 
-    fn save_preset_dialog(&mut self) {
+    fn save_preset_dialog(&mut self, ctx: &egui::Context) {
         let mut d = rfd::FileDialog::new().set_title("Save channel preset").add_filter("JSON", &["json"]).set_file_name("preset.json");
         if let Some(dir) = &self.last_dir {
             d = d.set_directory(dir);
         }
-        let Some(mut path) = d.save_file() else { return };
+        self.open_dialog(ctx, FileDialog::SavePreset, d, true);
+    }
+
+    fn save_preset(&mut self, mut path: PathBuf) {
         if path.extension().is_none_or(|e| e != "json") {
             path.set_extension("json");
         }
@@ -1004,10 +1055,7 @@ impl App {
         if let Some(dir) = self.video.as_ref().and_then(|v| v.path.parent().map(PathBuf::from)).or(self.last_dir.clone()) {
             d = d.set_directory(dir);
         }
-        if let Some(path) = d.pick_file() {
-            self.video_tex = None;
-            self.attach_video(path, ctx);
-        }
+        self.open_dialog(ctx, FileDialog::Video, d, false);
     }
 
     fn channels_ui(&mut self, ui: &mut egui::Ui) {
@@ -1145,8 +1193,8 @@ impl App {
                     }
                 }
             }
-            Some("Load…") => self.load_preset_dialog(),
-            Some("Save…") => self.save_preset_dialog(),
+            Some("Load…") => self.load_preset_dialog(ui.ctx()),
+            Some("Save…") => self.save_preset_dialog(ui.ctx()),
             _ => {}
         }
         if changed {
@@ -1538,7 +1586,14 @@ impl App {
         if let Some(dir) = video.parent() {
             d = d.set_directory(dir);
         }
-        let Some(mut out) = d.save_file() else { return Ok(()) };
+        let plan = ClipPlan { video, from, to, time_base, width, speed };
+        self.open_dialog(ctx, FileDialog::SaveClip(plan), d, true);
+        Ok(())
+    }
+
+    /// Render the checked clip to `out`, on a worker thread.
+    fn run_export(&mut self, ctx: &egui::Context, plan: ClipPlan, mut out: PathBuf) -> Result<(), String> {
+        let ClipPlan { video, from, to, time_base, width, speed } = plan;
         if out.extension().is_none() {
             out.set_extension("mp4");
         }
@@ -1603,6 +1658,9 @@ impl App {
             }
         }
         self.tick();
+        if let Some((what, path)) = crate::dialog::take_answer(&mut self.file_dialog) {
+            self.dialog_answered(&ctx, what, path);
+        }
         self.poll_video(&ctx);
         self.keys(&ctx);
         let building = self.builder.progress.lock().unwrap().is_some();

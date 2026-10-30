@@ -9,6 +9,7 @@ mod cache;
 mod clip;
 mod demo;
 mod desktop;
+mod dialog;
 mod filters;
 mod folder;
 mod gpu;

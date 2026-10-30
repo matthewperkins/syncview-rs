@@ -56,6 +56,8 @@ pub struct Splash {
     thumb: Option<Thumb>,
     /// Frames and triggers disagree: the message, and what opens if the user goes ahead.
     warning: Option<(String, Launch)>,
+    /// The folder or video dialog, while it is open (see dialog.rs).
+    file_dialog: Option<crate::dialog::Pending<()>>,
 }
 
 /// The waiting video's preview frame (decoded in the background) and a line about it.
@@ -180,6 +182,7 @@ impl Splash {
             stream,
             thumb: None,
             warning: None,
+            file_dialog: None,
         }
     }
 
@@ -346,21 +349,26 @@ impl Splash {
         }
     }
 
-    fn choose_folder(&mut self) {
-        if let Some(d) = rfd::FileDialog::new().set_title("Open Ephys folder: a session, Record Node or recording").pick_folder() {
-            self.take_paths(vec![d]);
+    fn choose_folder(&mut self, ctx: &egui::Context) {
+        if self.file_dialog.is_none() {
+            let d = rfd::FileDialog::new().set_title("Open Ephys folder: a session, Record Node or recording");
+            self.file_dialog = Some(crate::dialog::open(ctx, (), move || d.pick_folder()));
         }
     }
 
-    fn choose_video(&mut self) {
-        if let Some(v) = rfd::FileDialog::new().set_title("Video recorded during the session").add_filter("Video", &["mp4", "mkv", "mov", "avi"]).pick_file() {
-            self.take_paths(vec![v]);
+    fn choose_video(&mut self, ctx: &egui::Context) {
+        if self.file_dialog.is_none() {
+            let d = rfd::FileDialog::new().set_title("Video recorded during the session").add_filter("Video", &["mp4", "mkv", "mov", "avi"]);
+            self.file_dialog = Some(crate::dialog::open(ctx, (), move || d.pick_file()));
         }
     }
 
     /// Draw the page; returns what to open once the user has chosen.
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<Launch> {
         let ctx = ui.ctx().clone();
+        if let Some(((), Some(p))) = crate::dialog::take_answer(&mut self.file_dialog) {
+            self.take_paths(vec![p]);
+        }
         self.poll_demo(&ctx);
         self.update_thumb(&ctx);
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
@@ -389,14 +397,14 @@ impl Splash {
                     let bw = 150.0;
                     ui.add_space((ui.available_width() - 2.0 * bw - 8.0) / 2.0);
                     if ui.add_sized([bw, 26.0], egui::Button::new("Choose folder…")).clicked() {
-                        self.choose_folder();
+                        self.choose_folder(&ctx);
                     }
                     if ui.add_sized([bw, 26.0], egui::Button::new("Choose video…")).clicked() {
-                        self.choose_video();
+                        self.choose_video(&ctx);
                     }
                 });
                 if resp.clicked() {
-                    self.choose_folder();
+                    self.choose_folder(&ctx);
                 }
 
                 // what's waiting
