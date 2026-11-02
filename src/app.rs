@@ -998,7 +998,7 @@ impl App {
         use egui::Key;
         // annotation: label keys, Esc (drop the last open interval), undo / redo, Ctrl/Cmd+arrows
         // (previous / next event), Delete (the selected event)
-        let (mut step, mut delete) = (vec![], false);
+        let (mut step, mut delete, mut walk) = (vec![], false, vec![]);
         let (mut prime, mut stamp) = (vec![], 0usize);
         let (labels, esc, undo, redo) = ctx.input_mut(|i| {
             // Shift+letter primes (before plain letters: egui would match those with Shift held too)
@@ -1042,10 +1042,27 @@ impl App {
                 }
             }
             delete = i.consume_key(egui::Modifiers::NONE, Key::Delete) || i.consume_key(egui::Modifiers::NONE, Key::Backspace);
+            // Up / Down walk the events list (while the Events tab is showing)
+            if self.side_open && self.side_tab == SideTab::Events {
+                for e in &i.events {
+                    if let egui::Event::Key { key, pressed: true, modifiers, .. } = e
+                        && !modifiers.any()
+                    {
+                        match key {
+                            Key::ArrowUp => walk.push(-1),
+                            Key::ArrowDown => walk.push(1),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             (hit, i.consume_key(egui::Modifiers::NONE, Key::Escape), undo, redo)
         });
         for d in step {
             self.step_event(d);
+        }
+        for d in walk {
+            self.walk_list(d);
         }
         if delete {
             self.delete_selected();
@@ -1516,6 +1533,25 @@ impl App {
             }
             None => self.status = format!("no {} event {}", self.event_filter.as_deref().unwrap_or("other"), if d > 0 { "after this" } else { "before this" }),
         }
+    }
+
+    /// Up / Down in the Events tab: the previous / next event in the list from the selected one
+    /// (nothing selected: the first or last).
+    fn walk_list(&mut self, d: i64) {
+        let ids: Vec<String> =
+            self.ann.events.iter().filter(|e| self.shows(e) && self.event_filter.as_ref().is_none_or(|f| *f == e.label)).map(|e| e.id.clone()).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let at = self.selected_event.as_ref().and_then(|s| ids.iter().position(|id| id == s));
+        let k = match at {
+            Some(k) => (k as i64 + d).clamp(0, ids.len() as i64 - 1) as usize,
+            None if d > 0 => 0,
+            None => ids.len() - 1,
+        };
+        let id = ids[k].clone();
+        self.select_event(&id);
+        self.list_scroll = true;
     }
 
     fn delete_selected(&mut self) {

@@ -181,7 +181,8 @@ stamp lands on the frame on screen. With nothing open, Esc unprimes. Marks land 
 video's frames. Events
 show as bands on the chart and bars on the overview strip, and are listed in the **Events** tab
 (click one to select it and go there), with the annotator's name. Ctrl/Cmd+← / → steps to the
-previous / next event (only one label's, if the tab's filter says so); the selected event can be
+previous / next event (only one label's, if the tab's filter says so), and with the Events tab
+showing, ↑ / ↓ move the selection up and down the list; the selected event can be
 given a note, have its start or end moved to the current frame (**Start = here**, **End = here**),
 or be removed (Delete). Every change can be undone. **Audit mode** (the "audit: video only" box in the
 strip) hides the traces and earlier marks, so a stretch can be scored from the video alone; events
