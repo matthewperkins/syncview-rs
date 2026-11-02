@@ -143,6 +143,8 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 Controls are as in syncview: scroll = zoom time; sideways swipe, Shift+scroll or drag = pan;
 ⌘/Ctrl+scroll = scale one row's Y, double-click = reset it; click/drag the overview strip to jump;
 ←/→ one video frame (Shift: 10 % of the view), PgUp/PgDn, Home/End, Space play, [ / ] speed, +/- zoom.
+**F2** hides or shows the sidebar on the right (tabs **Channels** and **Events**); hidden, it leaves a
+thin rail to bring it back, and the video and chart get the full width.
 
 **Channel table** (right): Show, Label, Ch, Ref (bipolar reference), Mode, Low/High Hz (blank =
 no filter edge), Notch (e.g. `60` or `60,180`), DSP wzrd (`order=3 smooth_ms=10 env_lp=40 plot_fs=1000

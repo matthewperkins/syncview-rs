@@ -184,6 +184,15 @@ pub struct App {
     layout: preset::Layout,
     /// The file dialog that is open, if any (see dialog.rs).
     file_dialog: Option<crate::dialog::Pending<FileDialog>>,
+    /// The right-hand sidebar: which tab, and whether it is open (F2) or collapsed to a rail.
+    side_tab: SideTab,
+    side_open: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SideTab {
+    Channels,
+    Events,
 }
 
 /// At most this many videos at once (e.g. three side views and one from above).
@@ -451,6 +460,8 @@ impl App {
             free_area: Rect::NOTHING,
             layout: preset::Layout::default(),
             file_dialog: None,
+            side_tab: SideTab::Channels,
+            side_open: true,
             rec,
             cache,
         };
@@ -1179,17 +1190,52 @@ impl App {
         self.open_dialog(ctx, FileDialog::Video, d, false);
     }
 
-    fn channels_ui(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.label("Channels").on_hover_text(
+    /// The sidebar's tab bar: Channels | Events, and a button that collapses it (F2).
+    fn sidebar_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.side_tab, SideTab::Channels, "Channels").on_hover_text(
                 "Low/High Hz: filter band (blank = none). Notch: e.g. 60 or 60,180.\n\
                  DSP wzrd: key=value for order, smooth_ms, env_lp, plot_fs, win_s.\n\
                  Y range: 'auto' or 'lo, hi'. Text fields apply on Enter or when you click away.\n\
                  ⌘/Ctrl+scroll over a trace scales its Y range; double-click a trace resets it to auto.\n\
                  Click a row's number to select it for Up / Down / Remove, and as the template for Add.",
-            )
+            );
+            ui.selectable_value(&mut self.side_tab, SideTab::Events, "Events").on_hover_text("the events marked in this recording");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("▶").on_hover_text("hide the sidebar (F2)").clicked() {
+                    self.side_open = false;
+                }
+            });
         });
         ui.separator();
+    }
+
+    /// The Events tab (the list of marked events arrives with annotation).
+    fn events_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("No events yet.").color(LABEL));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Marked events (bites, chewing and grooming bouts, …) will be listed here, to jump to, edit and delete.").color(MUTED));
+    }
+
+    /// The collapsed sidebar: a thin rail that opens it again, on either tab.
+    fn sidebar_rail(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(4.0);
+            if ui.small_button("◀").on_hover_text("show the sidebar (F2)").clicked() {
+                self.side_open = true;
+            }
+            ui.add_space(10.0);
+            for (tab, letter, tip) in [(SideTab::Channels, "C", "Channels"), (SideTab::Events, "E", "Events")] {
+                if ui.selectable_label(self.side_tab == tab, letter).on_hover_text(tip).clicked() {
+                    self.side_tab = tab;
+                    self.side_open = true;
+                }
+            }
+        });
+    }
+
+    fn channels_ui(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         let mut action: Option<&str> = None;
         egui::Panel::bottom("channel_buttons").show(ui, |ui| {
@@ -1787,6 +1833,10 @@ impl App {
             }
         }
         self.tick();
+        // F2 shows or hides the sidebar, even while a text field has focus
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
+            self.side_open = !self.side_open;
+        }
         if let Some((what, path)) = crate::dialog::take_answer(&mut self.file_dialog) {
             self.dialog_answered(&ctx, what, path);
         }
@@ -1808,7 +1858,22 @@ impl App {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         let overview = egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui)).response.rect;
         let max_w = (ui.available_width() * 0.45).max(120.0);
-        egui::Panel::right("channels").resizable(true).default_size(760.0f32.min(max_w)).max_size(max_w).show(ui, |ui| self.channels_ui(ui));
+        if self.side_open {
+            // each tab keeps its own width: the channel table is wide, the events list narrow
+            let (id, width) = match self.side_tab {
+                SideTab::Channels => ("channels", 760.0f32),
+                SideTab::Events => ("events", 260.0),
+            };
+            egui::Panel::right(id).resizable(true).default_size(width.min(max_w)).max_size(max_w).show(ui, |ui| {
+                self.sidebar_tabs(ui);
+                match self.side_tab {
+                    SideTab::Channels => self.channels_ui(ui),
+                    SideTab::Events => self.events_ui(ui),
+                }
+            });
+        } else {
+            egui::Panel::right("sidebar_rail").exact_size(30.0).resizable(false).show(ui, |ui| self.sidebar_rail(ui));
+        }
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| {
             let central = ui.max_rect();
             self.free_area = Rect::from_min_max(central.min, Pos2::new(central.right(), overview.bottom().max(central.bottom())));
