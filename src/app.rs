@@ -1443,16 +1443,26 @@ impl App {
         ui.separator();
         let mut jump = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
             for e in self.ann.events.iter().filter(|e| self.shows(e) && self.event_filter.as_ref().is_none_or(|f| *f == e.label)) {
                 let len = if e.is_point() { String::new() } else { format!("  {:.2} s", e.end_s - e.start_s) };
                 let color = self.label_color(&e.label);
-                let r = ui.horizontal(|ui| {
+                // the whole row, full width, is one click target (its text isn't selectable)
+                let bg = ui.painter().add(egui::Shape::Noop);
+                let row = ui.horizontal(|ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.label(egui::RichText::new("■").color(color));
                     let bright = self.flash.as_ref().is_some_and(|(id, at)| *id == e.id && at.elapsed().as_secs_f32() < 0.8);
                     ui.label(egui::RichText::new(&e.label).color(if bright { color } else { LABEL }));
                     ui.label(egui::RichText::new(format!("{}{len}", fmt_time(e.start_s, None))).monospace().small().color(MUTED));
                 });
-                let r = r.response.interact(Sense::click()).on_hover_text(if e.note.is_empty() { "click to select it and go there".to_string() } else { e.note.clone() });
+                let r = ui
+                    .interact(row.response.rect, ui.id().with(("event_row", &e.id)), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(if e.note.is_empty() { "click to select it and go there".to_string() } else { e.note.clone() });
+                if r.hovered() {
+                    ui.painter().set(bg, egui::Shape::rect_filled(r.rect.expand(1.0), 3.0, Color32::from_white_alpha(14)));
+                }
                 if self.selected_event.as_ref() == Some(&e.id) {
                     ui.painter().rect_stroke(r.rect.expand(1.0), 3.0, Stroke::new(1.0, color), egui::StrokeKind::Outside);
                     if self.list_scroll {
