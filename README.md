@@ -152,8 +152,10 @@ syncview /path/to/folder          # finds the recording, videos and preset insid
 - **Several videos:** a second list asks which go with the recording. Enter opens the highlighted
   one (or none); Space or the box beside each video ticks several cameras (up to 4).
 - **One video** can be dropped with the folder, or before it (it's shown with a preview frame).
-- **Sync check:** if a video's frame count and its camera triggers differ by more than 2, a warning
-  says so first: open anyway, open without that video, or go back.
+- **Sync check:** each chosen video's frames are compared with its camera triggers before the viewer
+  opens (in the background, with a progress bar per video: the first time, this is where its
+  frames are indexed). If they differ by more than 2, a warning says so: open anyway, open
+  without that video, or go back.
 - **While viewing,** drop a video on the window to add it, or another folder to go back to the start
   page with it.
 - **The first open of a recording or video** does work that is then remembered: filtering the whole

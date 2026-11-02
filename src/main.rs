@@ -237,7 +237,7 @@ fn main() -> Result<()> {
             .collect();
         let index_dir = root.join("video_index");
         let n = video::frame_pts(&video, &index_dir)?.len();
-        let sync = oe::check_sync(&rec, n, cli.trigger_line, video::video_duration(&video)).map_err(|e| anyhow::anyhow!(e))?;
+        let sync = oe::check_sync(&rec, n, cli.trigger_line, video::indexed_stats(&video, &index_dir).map(|s| s.1)).map_err(|e| anyhow::anyhow!(e))?;
         for i in &sync.issues {
             eprintln!("syncview: warning: {i}");
         }

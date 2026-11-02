@@ -33,13 +33,8 @@ pub fn frame_pts(path: &Path, index_dir: &Path) -> Result<Vec<i64>> {
 /// `frame_pts`, reporting how much of the file has been read (0 to 1) while it builds the index
 /// (the first time a video is opened: it reads the whole file once).
 pub fn frame_pts_progress(path: &Path, index_dir: &Path, progress: &dyn Fn(f32)) -> Result<Vec<i64>> {
-    let path = std::fs::canonicalize(path)?;
+    let (path, file) = index_file(path, index_dir)?;
     let md = std::fs::metadata(&path)?;
-    let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let tag = format!("{}|{}|{}", path.display(), md.len(), mtime_ns);
-    let tag = &sha1_smol::Sha1::from(tag.as_bytes()).digest().to_string()[..16];
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let file = index_dir.join(format!("{stem}.{tag}.npy"));
     if let Ok(v) = npy::read_i64(&file) {
         return Ok(v);
     }
@@ -64,6 +59,44 @@ pub fn frame_pts_progress(path: &Path, index_dir: &Path, progress: &dyn Fn(f32))
         eprintln!("syncview: could not save the video index to {}: {e:#}", file.display());
     }
     Ok(pts)
+}
+
+/// The video (canonical path) and where its frame index is saved: named after the video, tagged by
+/// its path, size and modification time (the same file Python syncview writes).
+fn index_file(path: &Path, index_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let path = std::fs::canonicalize(path)?;
+    let md = std::fs::metadata(&path)?;
+    let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let tag = format!("{}|{}|{}", path.display(), md.len(), mtime_ns);
+    let tag = &sha1_smol::Sha1::from(tag.as_bytes()).digest().to_string()[..16];
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let file = index_dir.join(format!("{stem}.{tag}.npy"));
+    Ok((path, file))
+}
+
+/// Frame count and duration (s) from a video's saved frame index, if it has one (no index is
+/// built: that can take a while for a big file on a slow disk).
+pub fn indexed_stats(path: &Path, index_dir: &Path) -> Option<(usize, f64)> {
+    let (path, file) = index_file(path, index_dir).ok()?;
+    let pts = npy::read_i64(&file).ok()?;
+    Some((pts.len(), pts_duration(&path, &pts)?))
+}
+
+/// The span of these frame timestamps in seconds, plus one frame.
+fn pts_duration(path: &Path, pts: &[i64]) -> Option<f64> {
+    let ictx = open_input(path).ok()?;
+    let tb = ictx.streams().best(ff::media::Type::Video)?.time_base();
+    let (a, b) = (*pts.first()?, *pts.last()?);
+    let frame = if pts.len() > 1 { (b - a) as f64 / (pts.len() - 1) as f64 } else { 0.0 };
+    Some(((b - a) as f64 + frame) * tb.0 as f64 / tb.1.max(1) as f64)
+}
+
+/// Open a video. (For a fragmented MP4 FFmpeg reads every fragment's tables at open, which for a
+/// long recording on a spinning disk takes tens of seconds the first time; its `use_mfra_for`
+/// option avoids that but mis-times and drops the last frames of each fragment, so it isn't used.
+/// Later opens are quick: the OS keeps those small tables in memory.)
+fn open_input(path: &Path) -> Result<ff::format::context::Input> {
+    Ok(ff::format::input(&path)?)
 }
 
 /// Every video packet's timestamp, read by demuxing the whole file (any container; slow for big
@@ -169,7 +202,7 @@ pub fn check_index(path: &Path) -> Result<()> {
 
 /// Frames between keyframes if the stream has a fixed GOP, else None (first 2000 packets).
 fn keyframe_interval(path: &Path) -> Option<usize> {
-    let mut ictx = ff::format::input(&path).ok()?;
+    let mut ictx = open_input(path).ok()?;
     let si = ictx.streams().best(ff::media::Type::Video)?.index();
     let flags: Vec<bool> =
         ictx.packets().filter(|(s, p)| s.index() == si && p.size() > 0).take(2000).map(|(_, p)| p.is_key()).collect();
@@ -179,12 +212,6 @@ fn keyframe_interval(path: &Path) -> Option<usize> {
     }
     let d: Vec<usize> = keys.windows(2).map(|w| w[1] - w[0]).collect();
     if d.iter().all(|x| *x == d[0]) { Some(d[0]) } else { None }
-}
-
-pub fn video_duration(path: &Path) -> Option<f64> {
-    let ictx = ff::format::input(&path).ok()?;
-    let d = ictx.duration();
-    (d > 0).then(|| d as f64 / ff::ffi::AV_TIME_BASE as f64)
 }
 
 /// The hardware device type to try, if any (see the module docs).
@@ -314,7 +341,7 @@ impl Decoder {
         if pts.is_empty() {
             bail!("no timestamped video packets found");
         }
-        let ictx = ff::format::input(&path)?;
+        let ictx = open_input(path)?;
         let stream = ictx.streams().best(ff::media::Type::Video).context("no video stream")?;
         let si = stream.index();
         let mut ctx = ff::codec::context::Context::from_parameters(stream.parameters())?;
@@ -467,6 +494,8 @@ pub struct VideoInfo {
     pub height: usize,
     /// Codec and decoder, e.g. "hevc (videotoolbox)".
     pub backend: String,
+    /// From the frame index: the first frame's start to the last one's end, in seconds.
+    pub duration: Option<f64>,
 }
 
 /// Decodes up to frame k (seeking unless the decoder is already a little before k) and returns
@@ -532,7 +561,8 @@ impl VideoDecoder {
                 let n = dec.pts.len();
                 let (w, h) = (dec.dec.width() as usize, dec.dec.height() as usize);
                 let backend = dec.backend();
-                set(&|s| s.opened = Some(Ok(VideoInfo { n_frames: n, width: w, height: h, backend: backend.clone() })));
+                let duration = pts_duration(&p, &dec.pts);
+                set(&|s| s.opened = Some(Ok(VideoInfo { n_frames: n, width: w, height: h, backend: backend.clone(), duration })));
                 let mut cache: HashMap<usize, Arc<Frame>> = HashMap::new();
                 let mut order: VecDeque<usize> = VecDeque::new();
                 let mut next: Option<usize> = None;
@@ -651,7 +681,7 @@ impl FrameReader {
 
     /// The video's native size.
     pub fn native_size(path: &Path) -> Result<(u32, u32)> {
-        let ictx = ff::format::input(&path)?;
+        let ictx = open_input(path)?;
         let s = ictx.streams().best(ff::media::Type::Video).context("no video stream")?;
         let ctx = ff::codec::context::Context::from_parameters(s.parameters())?;
         let v = ctx.decoder().video()?;
@@ -758,22 +788,9 @@ pub fn bench(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Frames in the video by the container's count, or duration × frame rate when it has none: an
-/// estimate, for a quick check before the exact (packet-counting) index is built.
-pub fn estimate_frames(path: &Path) -> Option<usize> {
-    let ictx = ff::format::input(&path).ok()?;
-    let s = ictx.streams().best(ff::media::Type::Video)?;
-    if s.frames() > 0 {
-        return Some(s.frames() as usize);
-    }
-    let r = s.avg_frame_rate();
-    let d = ictx.duration();
-    (r.1 > 0 && d > 0).then(|| (d as f64 / ff::ffi::AV_TIME_BASE as f64 * r.0 as f64 / r.1 as f64).round() as usize)
-}
-
 /// One frame from about a tenth of the way in, scaled to fit in `max` × `max` pixels.
 pub fn thumbnail(path: &Path, max: u32) -> Result<Frame> {
-    let mut ictx = ff::format::input(&path)?;
+    let mut ictx = open_input(path)?;
     let stream = ictx.streams().best(ff::media::Type::Video).context("no video stream")?;
     let si = stream.index();
     let mut dec = ff::codec::context::Context::from_parameters(stream.parameters())?.decoder().video()?;

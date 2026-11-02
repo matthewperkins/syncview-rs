@@ -632,6 +632,12 @@ impl Drop for RemoveOnDrop {
 /// --cold: ask the OS to forget its in-memory copy of a file, or of every file under a folder, so
 /// the next read comes from the disk (Linux; elsewhere it says how to do it by hand).
 pub fn evict_from_memory(path: &Path) {
+    // once per file per run: a later open (the viewer after the start page's check) is then warm,
+    // as it would be on a real first open
+    static DONE: std::sync::Mutex<Option<HashSet<PathBuf>>> = std::sync::Mutex::new(None);
+    if !DONE.lock().unwrap().get_or_insert_with(HashSet::new).insert(path.to_path_buf()) {
+        return;
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;

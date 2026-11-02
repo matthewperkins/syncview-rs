@@ -65,7 +65,8 @@ impl Shell {
         let ctx = &cc.egui_ctx;
         // always dark, whatever the system theme (eframe would otherwise follow it)
         ctx.set_theme(egui::ThemePreference::Dark);
-        let splash = Splash::new(ctx, settings.cache_root.clone(), settings.trigger_line, settings.stream.clone());
+        let mut splash = Splash::new(ctx, settings.cache_root.clone(), settings.trigger_line, settings.stream.clone());
+        splash.cold = settings.cold;
         let mut shell = Self { settings, state: State::Splash(Box::new(splash)), screenshot, started: Instant::now(), shot_requested: false };
         match start {
             Start::Viewer(l) => shell.open(ctx, l),
@@ -86,7 +87,9 @@ impl Shell {
             }
             Err(e) => {
                 if !matches!(self.state, State::Splash(_)) {
-                    self.state = State::Splash(Box::new(Splash::new(ctx, self.settings.cache_root.clone(), self.settings.trigger_line, self.settings.stream.clone())));
+                    let mut s = Splash::new(ctx, self.settings.cache_root.clone(), self.settings.trigger_line, self.settings.stream.clone());
+                    s.cold = self.settings.cold;
+                    self.state = State::Splash(Box::new(s));
                 }
                 if let State::Splash(s) = &mut self.state {
                     s.error(format!("Couldn't open {}: {e:#}", l.rec.display()));
@@ -164,6 +167,7 @@ impl eframe::App for Shell {
                 let to_splash = dropped.len() > 1 || dropped.iter().any(|p| !crate::folder::is_video(p));
                 if to_splash {
                     let mut s = Splash::new(&ctx, self.settings.cache_root.clone(), self.settings.trigger_line, self.settings.stream.clone());
+                    s.cold = self.settings.cold;
                     s.take_paths(dropped);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title("syncview".into()));
                     self.state = State::Splash(Box::new(s));

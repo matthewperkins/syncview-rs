@@ -46,6 +46,15 @@ struct Picker {
     checked: Vec<bool>,
 }
 
+/// The background check before opening: what opens after it, each video's progress (None
+/// waiting, < 0 reading its frame tables, 0..1 indexing, 1 done), and the warnings when done.
+struct Check {
+    launch: Launch,
+    names: Vec<String>,
+    progress: std::sync::Arc<std::sync::Mutex<Vec<Option<f32>>>>,
+    rx: Receiver<Vec<(PathBuf, String)>>,
+}
+
 /// Frames and triggers disagree for some videos: the message, what opens if the user goes ahead,
 /// those videos, and when it appeared.
 struct Warning {
@@ -75,7 +84,7 @@ impl Picker {
     }
 
     /// Shown at once, with each item's detail line filled in by a background thread.
-    fn new(what: Pick, mut items: Vec<Item>, sel: usize, trigger_line: i64) -> Picker {
+    fn new(what: Pick, mut items: Vec<Item>, sel: usize, trigger_line: i64, index_dir: PathBuf) -> Picker {
         let paths: Vec<(usize, PathBuf)> = items.iter().enumerate().filter_map(|(k, it)| it.path.clone().map(|p| (k, p))).collect();
         for (k, _) in &paths {
             items[*k].detail = "…".into();
@@ -83,7 +92,7 @@ impl Picker {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             for (k, p) in paths {
-                let d = if what == Pick::Recording { describe_recording(&p, trigger_line) } else { describe_video(&p) };
+                let d = if what == Pick::Recording { describe_recording(&p, trigger_line) } else { describe_video(&p, &index_dir) };
                 if tx.send((k, d)).is_err() {
                     return;
                 }
@@ -116,6 +125,10 @@ pub struct Splash {
     warning: Option<Warning>,
     /// See SETTLE (zero in tests, which send input straight away).
     settle: Duration,
+    /// Videos being checked against the triggers before opening (see go).
+    check: Option<Check>,
+    /// --cold: drop the chosen recording's and videos' files from the OS's memory before the check.
+    pub cold: bool,
     /// The folder or video dialog, while it is open (see dialog.rs).
     file_dialog: Option<crate::dialog::Pending<()>>,
 }
@@ -135,8 +148,7 @@ const WARN_TEXT: Color32 = Color32::from_rgb(0xf2, 0xb0, 0xa6);
 
 /// A warning when the video's frame count (estimated from the container) and the recording's
 /// camera triggers differ by more than 2 (one extra trigger at the end is normal).
-fn alignment_warning(rec: &Path, video_path: &Path, stream: Option<&str>, line: i64) -> Option<String> {
-    let frames = video::estimate_frames(video_path)?;
+fn alignment_warning(rec: &Path, frames: usize, video_path: &Path, stream: Option<&str>, line: i64) -> Option<String> {
     let r = openephys::Recording::open(rec).ok()?;
     let c = match stream {
         Some(s) => r.stream(s).ok()?,
@@ -156,7 +168,7 @@ fn alignment_warning(rec: &Path, video_path: &Path, stream: Option<&str>, line: 
     } else {
         format!("There are {diff} more triggers than frames. Video frame k is matched to trigger k, so frames missing from the video (or the wrong video) would shift everything after them.")
     };
-    Some(format!("{name} has about {frames} frames, but the recording has {triggers} camera triggers on TTL line {l}.\n\n{why}"))
+    Some(format!("{name} has {frames} frames, but the recording has {triggers} camera triggers on TTL line {l}.\n\n{why}"))
 }
 
 /// Milliseconds since 1970 as a local date and time (to the minute), like the session folder
@@ -214,11 +226,14 @@ fn describe_recording(path: &Path, line: i64) -> String {
     parts.join("  ·  ")
 }
 
-fn describe_video(path: &Path) -> String {
+/// Size, and duration and frame count if the video has been indexed before (opening a big video
+/// just to describe it can take long on a slow disk).
+fn describe_video(path: &Path, index_dir: &Path) -> String {
     let size = std::fs::metadata(path).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0);
-    match video::video_duration(path) {
-        Some(d) => format!("{}  ·  {size:.0} MB", fmt_time(d, Some(3600.0))),
-        None => format!("{size:.0} MB"),
+    let size = if size >= 1000.0 { format!("{:.1} GB", size / 1000.0) } else { format!("{size:.0} MB") };
+    match video::indexed_stats(path, index_dir) {
+        Some((n, d)) => format!("{}  ·  {n} frames  ·  {size}", fmt_time(d, Some(3600.0))),
+        None => format!("{size}  ·  not indexed yet"),
     }
 }
 
@@ -255,6 +270,8 @@ impl Splash {
             warning: None,
             settle: SETTLE,
             file_dialog: None,
+            check: None,
+            cold: false,
         }
     }
 
@@ -315,7 +332,7 @@ impl Splash {
             }
             _ => {
                 let items = found.iter().map(|r| Item { path: Some(r.clone()), label: rel(r, &dir), detail: String::new() }).collect();
-                self.picker = Some(Picker::new(Pick::Recording, items, 0, self.trigger_line));
+                self.picker = Some(Picker::new(Pick::Recording, items, 0, self.trigger_line, self.index_dir()));
                 self.later_videos = Some((dir.clone(), vids));
             }
         }
@@ -334,24 +351,100 @@ impl Splash {
                 items.extend(vids.iter().map(|v| Item { path: Some(v.clone()), label: rel(v, dir), detail: String::new() }));
                 // pre-select the dropped video if it's one of them, else the first video
                 let sel = self.video.as_ref().and_then(|v| vids.iter().position(|x| x == v)).map_or(1, |i| i + 1);
-                self.picker = Some(Picker::new(Pick::Video, items, sel, self.trigger_line));
+                self.picker = Some(Picker::new(Pick::Video, items, sel, self.trigger_line, self.index_dir()));
             }
         }
     }
 
+    /// Where video frame indexes are saved (shared with the viewer).
+    fn index_dir(&self) -> PathBuf {
+        self.cache_root.join("video_index")
+    }
+
+    /// Open the chosen recording and videos, after checking each video's frames against the
+    /// camera triggers. The check runs in the background (see Check): it builds each video's frame
+    /// index, which the first time can take a while for a big video, and which the viewer then
+    /// finds ready.
     fn go(&mut self) {
         let Some(rec) = self.rec.clone() else { return };
-        let videos = if self.picked.is_empty() { self.video.iter().cloned().collect() } else { self.picked.clone() };
+        let videos: Vec<PathBuf> = if self.picked.is_empty() { self.video.iter().cloned().collect() } else { self.picked.clone() };
         let l = Launch { rec, videos, preset: self.preset.clone(), time: None };
-        let warnings: Vec<(PathBuf, String)> =
-            l.videos.iter().filter_map(|v| alignment_warning(&l.rec, v, self.stream.as_deref(), self.trigger_line).map(|w| (v.clone(), w))).collect();
-        if !warnings.is_empty() {
-            let text = warnings.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("\n\n");
-            let bad = warnings.into_iter().map(|(v, _)| v).collect();
-            self.warning = Some(Warning { text, launch: l, bad, shown: Instant::now() });
+        if l.videos.is_empty() {
+            self.launch = Some(l);
             return;
         }
-        self.launch = Some(l);
+        if self.cold {
+            crate::cache::evict_from_memory(&l.rec);
+            for v in &l.videos {
+                crate::cache::evict_from_memory(v);
+            }
+        }
+        let names: Vec<String> = l.videos.iter().map(|v| v.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(vec![None; l.videos.len()]));
+        let (tx, rx) = channel();
+        let (p, vids, rec, idx, stream, line) = (progress.clone(), l.videos.clone(), l.rec.clone(), self.index_dir(), self.stream.clone(), self.trigger_line);
+        std::thread::spawn(move || {
+            let mut warnings = vec![];
+            for (i, v) in vids.iter().enumerate() {
+                p.lock().unwrap()[i] = Some(-1.0);
+                // an unreadable video is reported by the viewer; nothing to compare here
+                if let Ok(pts) = video::frame_pts_progress(v, &idx, &|f| p.lock().unwrap()[i] = Some(f))
+                    && let Some(w) = alignment_warning(&rec, pts.len(), v, stream.as_deref(), line)
+                {
+                    warnings.push((v.clone(), w));
+                }
+                p.lock().unwrap()[i] = Some(1.0);
+            }
+            let _ = tx.send(warnings);
+        });
+        self.check = Some(Check { launch: l, names, progress, rx });
+    }
+
+    /// The background check (see go): progress while it runs, then the warning or the viewer.
+    fn check_ui(&mut self, ctx: &egui::Context) {
+        let Some(c) = &self.check else { return };
+        if let Ok(warnings) = c.rx.try_recv() {
+            let l = self.check.take().unwrap().launch;
+            if warnings.is_empty() {
+                self.launch = Some(l);
+            } else {
+                let text = warnings.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("\n\n");
+                let bad = warnings.into_iter().map(|(v, _)| v).collect();
+                self.warning = Some(Warning { text, launch: l, bad, shown: Instant::now() });
+            }
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let progress = c.progress.lock().unwrap().clone();
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("syncview-check")).show(ctx, |ui| {
+            ui.set_width(560f32.min(ctx.content_rect().width() - 80.0));
+            ui.label(RichText::new("Checking the videos against the camera triggers").size(17.0).color(LABEL));
+            ui.label(
+                RichText::new("The first time a video is opened, syncview indexes its frames; it remembers them, so next time this is instant.")
+                    .color(MUTED),
+            );
+            ui.add_space(8.0);
+            for (name, f) in c.names.iter().zip(&progress) {
+                ui.horizontal(|ui| {
+                    let bar = match f {
+                        None => egui::ProgressBar::new(0.0).text("waiting"),
+                        Some(f) if *f < 0.0 => egui::ProgressBar::new(0.0).animate(true).text("reading frame tables"),
+                        Some(f) if *f >= 1.0 => egui::ProgressBar::new(1.0).text("done"),
+                        Some(f) => egui::ProgressBar::new(*f).text(format!("{:.0} %", f * 100.0)),
+                    };
+                    ui.add(bar.desired_width(220.0));
+                    ui.label(RichText::new(name).color(FG).monospace());
+                });
+            }
+            ui.add_space(8.0);
+            cancel = ui.button("Cancel").clicked();
+        });
+        if cancel {
+            // the indexing carries on in the background (and is kept for next time)
+            self.check = None;
+            self.note("Cancelled. Choose the recording again to open it.".into());
+        }
     }
 
     /// Start or collect the preview of the waiting video.
@@ -367,8 +460,7 @@ impl Splash {
                 let _ = tx.send(video::thumbnail(&p, (THUMB * 2.0) as u32).map_err(|e| format!("{e:#}")));
                 c.request_repaint();
             });
-            let frames = video::estimate_frames(v).map(|n| format!("  ·  ~{n} frames")).unwrap_or_default();
-            self.thumb = Some(Thumb { path: v.clone(), detail: describe_video(v) + &frames, rx: Some(rx), tex: None, error: None });
+            self.thumb = Some(Thumb { path: v.clone(), detail: describe_video(v, &self.index_dir()), rx: Some(rx), tex: None, error: None });
         }
         let t = self.thumb.as_mut().unwrap();
         if let Some(rx) = &t.rx
@@ -581,6 +673,7 @@ impl Splash {
             });
         });
         self.picker_ui(&ctx);
+        self.check_ui(&ctx);
         self.warning_ui(&ctx);
         self.launch.take()
     }
@@ -814,6 +907,12 @@ mod tests {
         }
         let mut out = None;
         let _ = ctx.run_ui(input, |ui| out = out.take().or(s.ui(ui)));
+        // a background check of the chosen videos (see go): step frames until it has finished
+        let t0 = Instant::now();
+        while out.is_none() && s.check.is_some() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| out = out.take().or(s.ui(ui)));
+        }
         out
     }
 

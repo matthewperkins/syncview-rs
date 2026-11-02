@@ -6,7 +6,7 @@ use crate::cache::{CacheBuilder, Trace, TraceCache, WindowWorker};
 use crate::filters::MODES;
 use crate::oe::{check_sync, Recording};
 use crate::preset::{self, Clip, Preset, Spec};
-use crate::video::{video_duration, VideoDecoder};
+use crate::video::VideoDecoder;
 use crate::gpu::{px_for, LineStrip};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use eframe::egui_wgpu;
@@ -260,8 +260,8 @@ const MAX_VIDEOS: usize = 4;
 struct Cam {
     dec: VideoDecoder,
     line: i64,
-    /// Frame count, width, height and decoder, once the video has opened.
-    opened: Option<(usize, usize, usize, String)>,
+    /// Frame count, width, height, decoder and duration, once the video has opened.
+    opened: Option<(usize, usize, usize, String, Option<f64>)>,
     /// Once synced: each frame's trigger time (s) and recording row, and the frame period.
     frames: Vec<f64>,
     rows: Vec<i64>,
@@ -713,11 +713,11 @@ impl App {
     /// Lock video i's frames to the triggers on its TTL line (again, after the line changes).
     fn sync_cam(&mut self, i: usize) {
         let c = &mut self.cams[i];
-        let Some((n, w, h, backend)) = c.opened.clone() else { return };
+        let Some((n, w, h, backend, duration)) = c.opened.clone() else { return };
         let name = c.name();
         c.ready = false;
         c.want = None;
-        match check_sync(&self.rec, n, c.line, video_duration(&c.dec.path)) {
+        match check_sync(&self.rec, n, c.line, duration) {
             Err(e) => {
                 eprintln!("syncview: sync error ({name}): {e}");
                 c.msg = format!("{name}: {e}");
@@ -754,7 +754,7 @@ impl App {
         for i in 0..self.cams.len() {
             match self.cams[i].dec.take_opened() {
                 Some(Ok(info)) => {
-                    self.cams[i].opened = Some((info.n_frames, info.width, info.height, info.backend));
+                    self.cams[i].opened = Some((info.n_frames, info.width, info.height, info.backend, info.duration));
                     self.sync_cam(i);
                 }
                 Some(Err(msg)) => {
