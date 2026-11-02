@@ -208,6 +208,8 @@ pub struct App {
     note_edit: String,
     /// Scroll the events list to the selected event (after stepping to it with the keys).
     list_scroll: bool,
+    /// The primed label (the "brush"): the stamp key (`, top left) marks it at the frame on screen.
+    primed: Option<String>,
     /// Audit mode: score from the video alone (traces and earlier marks hidden; events marked now
     /// record view "video").
     audit: bool,
@@ -268,6 +270,8 @@ struct Cam {
     tex: Option<egui::TextureHandle>,
     size: [usize; 2],
     caption: String,
+    /// The frame now on screen (decoding can trail the cursor while playing).
+    shown: Option<usize>,
     /// Shown instead of the frame while not empty (opening…, errors, outside the video).
     msg: String,
     want: Option<usize>,
@@ -276,7 +280,7 @@ struct Cam {
 impl Cam {
     fn new(dec: VideoDecoder, line: i64, msg: String) -> Cam {
         let (frames, rows, tex, caption, want) = (vec![], vec![], None, String::new(), None);
-        Cam { dec, line, opened: None, frames, rows, period: 0.02, ready: false, tex, size: [0, 0], caption, msg, want }
+        Cam { dec, line, opened: None, frames, rows, period: 0.02, ready: false, tex, size: [0, 0], caption, shown: None, msg, want }
     }
 
     fn name(&self) -> String {
@@ -535,6 +539,7 @@ impl App {
             note_edit: String::new(),
             list_scroll: false,
             audit: false,
+            primed: None,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.rec_dir),
@@ -767,6 +772,7 @@ impl App {
                     None => c.tex = Some(ctx.load_texture(format!("video{i}"), img, egui::TextureOptions::LINEAR)),
                 }
                 c.size = [f.width, f.height];
+                c.shown = Some(f.index);
                 let trig = c.frames.get(f.index).map(|t| fmt_time(*t, None)).unwrap_or_default();
                 c.caption = format!("frame {}   trigger {}", f.index, trig);
             }
@@ -993,7 +999,25 @@ impl App {
         // annotation: label keys, Esc (drop the last open interval), undo / redo, Ctrl/Cmd+arrows
         // (previous / next event), Delete (the selected event)
         let (mut step, mut delete) = (vec![], false);
+        let (mut prime, mut stamp) = (vec![], 0usize);
         let (labels, esc, undo, redo) = ctx.input_mut(|i| {
+            // Shift+letter primes (before plain letters: egui would match those with Shift held too)
+            for (n, l) in self.labels.iter().enumerate() {
+                if let Some(k) = Key::from_name(&l.key.to_uppercase())
+                    && i.consume_key(egui::Modifiers::SHIFT, k)
+                {
+                    prime.push(n);
+                }
+            }
+            // the stamp key: the one left of 1, by position (` on US keyboards)
+            for e in &i.events {
+                if let egui::Event::Key { key, physical_key, pressed: true, repeat: false, modifiers, .. } = e
+                    && (*key == Key::Backtick || *physical_key == Some(Key::Backtick))
+                    && !modifiers.any()
+                {
+                    stamp += 1;
+                }
+            }
             let mut hit = vec![];
             for (n, l) in self.labels.iter().enumerate() {
                 if let Some(k) = Key::from_name(&l.key.to_uppercase())
@@ -1026,11 +1050,21 @@ impl App {
         if delete {
             self.delete_selected();
         }
+        for n in prime {
+            self.prime(n);
+        }
         for n in labels {
             self.label_key(n);
         }
-        if esc && let Some((label, m)) = self.open_marks.pop() {
-            self.status = format!("{label} from {} cancelled", fmt_time(m.t, None));
+        for _ in 0..stamp {
+            self.stamp();
+        }
+        if esc {
+            if let Some((label, m)) = self.open_marks.pop() {
+                self.status = format!("{label} from {} cancelled", fmt_time(m.t, None));
+            } else if let Some(p) = self.primed.take() {
+                self.status = format!("{p} unprimed");
+            }
         }
         if undo {
             self.undo_edit();
@@ -1550,9 +1584,31 @@ impl App {
     /// Where a mark made now lands: the reference video's current frame (its trigger time and
     /// sample), or the cursor when there is no video.
     fn mark_here(&self) -> Mark {
-        match self.cam0().and_then(|c| c.frame_at(self.t).map(|k| (c, k))) {
+        // playing: the frame on screen (what the eye saw); paused: the frame at the cursor
+        let at = |c: &Cam| if self.playing { c.shown.filter(|k| *k < c.frames.len()).or_else(|| c.frame_at(self.t)) } else { c.frame_at(self.t) };
+        match self.cam0().and_then(|c| at(c).map(|k| (c, k))) {
             Some((c, k)) => Mark { t: c.frames[k], sample: c.rows[k], frame: Some(k as i64) },
             None => Mark { t: self.t, sample: (self.t * self.rec.fs).round() as i64, frame: None },
+        }
+    }
+
+    /// Prime label n (again: unprime it).
+    fn prime(&mut self, n: usize) {
+        let name = self.labels[n].name.clone();
+        if self.primed.as_ref() == Some(&name) {
+            self.primed = None;
+            self.status = format!("{name} unprimed");
+        } else {
+            self.status = format!("{name} primed: ` stamps it at the frame on screen (Esc unprimes)");
+            self.primed = Some(name);
+        }
+    }
+
+    /// The stamp key: mark the primed label (open or close its interval).
+    fn stamp(&mut self) {
+        match self.primed.as_ref().and_then(|p| self.labels.iter().position(|l| l.name == *p)) {
+            Some(n) => self.label_key(n),
+            None => self.status = "nothing primed: Shift+letter (or click a label) first, then ` stamps it".into(),
         }
     }
 
@@ -1654,6 +1710,7 @@ impl App {
     /// Under the toolbar: every label with its key and colour; an open interval's chip is lit and
     /// says where it started.
     fn label_strip(&mut self, ui: &mut egui::Ui) {
+        let mut prime = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             for l in &self.labels {
@@ -1664,15 +1721,22 @@ impl App {
                     None if l.key.is_empty() => l.name.clone(),
                     None => format!("[{}] {}", l.key, l.name),
                 };
+                let primed = self.primed.as_ref() == Some(&l.name);
                 let chip = egui::Frame::new()
-                    .fill(if open.is_some() { c.gamma_multiply(0.35) } else { Color32::TRANSPARENT })
-                    .stroke(Stroke::new(1.0, c.gamma_multiply(if open.is_some() { 1.0 } else { 0.5 })))
+                    .fill(if open.is_some() { c.gamma_multiply(0.35) } else if primed { c.gamma_multiply(0.15) } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::new(if primed { 2.0 } else { 1.0 }, c.gamma_multiply(if open.is_some() || primed { 1.0 } else { 0.5 })))
                     .corner_radius(4.0)
                     .inner_margin(egui::Margin::symmetric(6, 1));
                 let kind = if l.kind == preset::LabelKind::Point { "a point" } else { "an interval: press once at its start and again at its end" };
-                chip.show(ui, |ui| ui.label(egui::RichText::new(text).color(if open.is_some() { LABEL } else { c }).size(12.5)))
+                let shift = if l.key.is_empty() { String::new() } else { format!(" (or Shift+{})", l.key) };
+                let r = chip
+                    .show(ui, |ui| ui.label(egui::RichText::new(text).color(if open.is_some() || primed { LABEL } else { c }).size(12.5)))
                     .response
-                    .on_hover_text(format!("{}: {kind}", l.name));
+                    .interact(Sense::click())
+                    .on_hover_text(format!("{}: {kind}\nclick{shift} to prime it, so ` stamps it", l.name));
+                if r.clicked() {
+                    prime = Some(l.name.clone());
+                }
             }
             let was = self.audit;
             ui.checkbox(&mut self.audit, "audit: video only").on_hover_text(
@@ -1688,10 +1752,19 @@ impl App {
             if self.ann.load_error.is_some() {
                 ui.label(egui::RichText::new("annotations read-only (see Events)").color(Color32::from_rgb(0xe0, 0x70, 0x60)));
             } else {
-                let undo = if cfg!(target_os = "macos") { "Cmd+Z undo, Cmd+Shift+Z redo" } else { "Ctrl+Z undo, Ctrl+Shift+Z redo" };
-                ui.label(egui::RichText::new(format!("Esc cancels an open interval · {undo}")).small().color(MUTED));
+                let undo = if cfg!(target_os = "macos") { "Cmd+Z undo" } else { "Ctrl+Z undo" };
+                let brush = match &self.primed {
+                    Some(p) => format!("primed: {p} — ` stamps"),
+                    None => "Shift+letter primes a label, ` stamps it".into(),
+                };
+                ui.label(egui::RichText::new(format!("{brush} · Esc cancels / unprimes · {undo}")).small().color(MUTED));
             }
         });
+        if let Some(name) = prime
+            && let Some(n) = self.labels.iter().position(|l| l.name == name)
+        {
+            self.prime(n);
+        }
     }
 
     /// Save the annotations a second after the last change (and say so once if it fails).
