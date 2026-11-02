@@ -208,6 +208,8 @@ pub struct App {
     note_edit: String,
     /// Scroll the events list to the selected event (after stepping to it with the keys).
     list_scroll: bool,
+    /// The key reference (?) is showing.
+    help: bool,
     /// The primed label (the "brush"): the stamp key (`, top left) marks it at the frame on screen.
     primed: Option<String>,
     /// Audit mode: score from the video alone (traces and earlier marks hidden; events marked now
@@ -540,6 +542,7 @@ impl App {
             list_scroll: false,
             audit: false,
             primed: None,
+            help: false,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.rec_dir),
@@ -1005,6 +1008,24 @@ impl App {
             return;
         }
         use egui::Key;
+        // ? shows the key reference, | the sidebar: by the character typed, so on any layout
+        let (question, pipe) = ctx.input(|i| {
+            let typed = |c: &str| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == c));
+            (typed("?"), typed("|"))
+        });
+        if question {
+            self.help = !self.help;
+        }
+        if pipe {
+            self.side_open = !self.side_open;
+        }
+        if self.help {
+            // nothing else while it's up (a label key would mark an event behind it)
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                self.help = false;
+            }
+            return;
+        }
         // annotation: label keys, Esc (drop the last open interval), undo / redo, Ctrl/Cmd+arrows
         // (previous / next event), Delete (the selected event)
         let (mut step, mut delete, mut walk) = (vec![], false, vec![]);
@@ -1249,6 +1270,9 @@ impl App {
                     .on_hover_text("how far the outline extends beyond the trace on each side");
             }
             ui.separator();
+            if ui.button("?").on_hover_text("keys and mouse (?)").clicked() {
+                self.help = !self.help;
+            }
             let fr = self.current_frame().map(|k| format!("   frame {k}")).unwrap_or_default();
             ui.label(egui::RichText::new(format!("t = {}  ({:.3} s){fr}", fmt_time(self.t, None), self.t)).monospace().size(13.0));
         });
@@ -1803,6 +1827,89 @@ impl App {
         }
         self.sync_note();
         self.undo.push(op);
+    }
+
+    /// The key reference (? toggles it): every key and gesture, and this preset's labels.
+    fn help_ui(&mut self, ctx: &egui::Context) {
+        if !self.help {
+            return;
+        }
+        let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let sections: Vec<(&str, Vec<(String, &str)>)> = vec![
+            ("Moving", vec![
+                ("← / →".into(), "one video frame"),
+                ("Shift + ← / →".into(), "10 % of the view"),
+                ("PgUp / PgDn".into(), "one view back / forward"),
+                ("Home / End".into(), "start / end of the recording"),
+                ("Space".into(), "play / pause"),
+                ("[  /  ]".into(), "slower / faster"),
+                ("go to (toolbar)".into(), "type h:mm:ss or seconds"),
+            ]),
+            ("Zoom and scale", vec![
+                ("scroll, or + / -".into(), "zoom time"),
+                ("drag, sideways swipe, Shift + scroll".into(), "pan time"),
+                (format!("{cmd} + scroll over a row"), "scale that row"),
+                ("double-click a row".into(), "reset its scale"),
+                ("click / drag the overview strip".into(), "jump there"),
+            ]),
+            ("Window", vec![
+                ("|  or  F2".into(), "hide / show the sidebar"),
+                ("?".into(), "this list"),
+            ]),
+            ("Annotating", vec![
+                ("a label's key".into(), "mark it: press at the start, again at the end"),
+                ("Shift + a label's key".into(), "prime it (or click its chip)"),
+                ("the key left of 1 (` on US keyboards)".into(), "stamp the primed label"),
+                ("Esc".into(), "cancel an open interval; with none open, unprime"),
+                (format!("{cmd} + Z  /  {cmd} + Shift + Z"), "undo / redo"),
+                ("↑ / ↓ (Events tab showing)".into(), "previous / next event in the list"),
+                (format!("{cmd} + ← / →"), "previous / next event in time"),
+                ("Delete".into(), "remove the selected event"),
+            ]),
+        ];
+        let labels: Vec<(String, String, Color32)> = self
+            .labels
+            .iter()
+            .map(|l| (if l.key.is_empty() { "—".into() } else { l.key.clone() }, l.name.clone(), self.label_color(&l.name)))
+            .collect();
+        let modal = egui::Modal::new(egui::Id::new("syncview-keys")).show(ctx, |ui| {
+            ui.set_width(780f32.min(ctx.content_rect().width() - 80.0));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Keys and mouse").size(17.0).color(LABEL));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("? or Esc closes").small().color(MUTED));
+                });
+            });
+            ui.add_space(6.0);
+            ui.columns(2, |cols| {
+                for (k, (title, rows)) in sections.iter().enumerate() {
+                    let ui = &mut cols[if k < 2 { 0 } else { 1 }];
+                    ui.label(egui::RichText::new(*title).color(LABEL).strong());
+                    egui::Grid::new(("keys", k)).num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+                        for (key, what) in rows {
+                            ui.label(egui::RichText::new(key).monospace().color(FG));
+                            ui.label(egui::RichText::new(*what).color(MUTED));
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+                let ui = &mut cols[1];
+                if !labels.is_empty() {
+                    ui.label(egui::RichText::new("Labels (this preset)").color(LABEL).strong());
+                    egui::Grid::new("keys_labels").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+                        for (key, name, c) in &labels {
+                            ui.label(egui::RichText::new(key).monospace().color(*c));
+                            ui.label(egui::RichText::new(name).color(*c));
+                            ui.end_row();
+                        }
+                    });
+                }
+            });
+        });
+        if modal.should_close() {
+            self.help = false;
+        }
     }
 
     /// Under the toolbar: every label with its key and colour; an open interval's chip is lit and
@@ -2614,6 +2721,7 @@ impl App {
             self.traces_ui(ui, rect, &resp, hovered);
         });
         self.dialogs_ui(&ctx);
+        self.help_ui(&ctx);
         // (testing: SYNCVIEW_RS_TEST_EXPORT=1 opens the export dialog once the video is synced)
         if self.cam0().is_some() && !self.export.open && self.export.from.is_empty() && std::env::var_os("SYNCVIEW_RS_TEST_EXPORT").is_some() {
             self.open_export();

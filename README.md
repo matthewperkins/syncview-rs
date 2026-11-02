@@ -49,7 +49,8 @@ the current view).*
 | Pan time | drag, sideways swipe, or Shift+scroll |
 | Page, start, end | PgUp / PgDn, Home / End; click or drag the overview strip to jump |
 | Scale one row / reset it | ⌘ or Ctrl + scroll over the row / double-click it |
-| Hide the sidebar | F2 |
+| Hide the sidebar | `\|` or F2 |
+| List all keys | `?` (or the **?** button in the toolbar) |
 | Mark an event | its label's key at the start, again at the end (labels shown under the toolbar) |
 | Mark with the other hand | Shift + key primes a label; the key left of `1` (`` ` ``) stamps it |
 | Cancel an open event / undo / redo | Esc / Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS) |
@@ -192,7 +193,7 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 ## The viewer
 
 The [cheat sheet](#cheat-sheet) lists the keys. The sidebar on the right has two tabs, **Channels**
-and **Events**; F2 hides it to a thin rail so the video and chart get the full width.
+and **Events**; `|` or F2 hides it to a thin rail so the video and chart get the full width.
 
 ### Channel table
 
