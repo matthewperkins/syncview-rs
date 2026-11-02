@@ -620,6 +620,43 @@ impl Drop for WindowWorker {
     }
 }
 
+/// Removes a folder (and everything in it) when dropped: --cold's throwaway cache.
+pub struct RemoveOnDrop(pub PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// --cold: ask the OS to forget its in-memory copy of a file, or of every file under a folder, so
+/// the next read comes from the disk (Linux; elsewhere it says how to do it by hand).
+pub fn evict_from_memory(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let mut n = 0u64;
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            if p.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(&p) {
+                    stack.extend(rd.flatten().map(|e| e.path()));
+                }
+            } else if let Ok(f) = std::fs::File::open(&p) {
+                // SAFETY: plain syscall on a file descriptor we own
+                unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+                n += f.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+        eprintln!("syncview: --cold: dropped {:.1} GB of {} from memory", n as f64 / 1e9, path.display());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        static NOTED: std::sync::Once = std::sync::Once::new();
+        NOTED.call_once(|| eprintln!("syncview: --cold: the OS may still hold {} in memory; for a cold disk, run `sudo purge` (macOS) first", path.display()));
+    }
+}
+
 /// Cache root: --cache > $SYNCVIEW_RS_CACHE (or the pre-0.2 $SYNCVIEWR_CACHE) > the platform's
 /// per-user cache folder.
 pub fn default_root() -> PathBuf {

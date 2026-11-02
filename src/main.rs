@@ -118,6 +118,10 @@ struct Cli {
     /// (testing) time software and hardware decoding of this video, then exit
     #[arg(long, hide = true, value_name = "VIDEO")]
     bench_video: Option<PathBuf>,
+    /// (testing) open as if for the first time: a fresh cache (beside the real one, removed on exit)
+    /// and, on Linux, the recording's and videos' files dropped from the OS's memory first
+    #[arg(long, hide = true)]
+    cold: bool,
     /// (testing) build this video's frame index both ways (container tables, full scan) and compare
     #[arg(long, hide = true, value_name = "VIDEO")]
     check_index: Option<PathBuf>,
@@ -169,8 +173,17 @@ fn main() -> Result<()> {
     if let Some(v) = &cli.bench_video {
         return video::bench(v);
     }
-    let root = cli.cache.clone().unwrap_or_else(cache::default_root);
-    eprintln!("syncview: cache folder {}", root.display());
+    let mut root = cli.cache.clone().unwrap_or_else(cache::default_root);
+    // --cold: a throwaway cache on the same disk as the real one (so writing it costs the same)
+    let _cold_cache = if cli.cold {
+        let name = format!("{}-cold-{}", root.file_name().unwrap_or_default().to_string_lossy(), std::process::id());
+        root = root.with_file_name(name);
+        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+        Some(cache::RemoveOnDrop(root.clone()))
+    } else {
+        None
+    };
+    eprintln!("syncview: cache folder {}{}", root.display(), if cli.cold { " (--cold: removed on exit)" } else { "" });
     let mut start = shell::Start::Splash(vec![]);
     if let Some(dir) = &cli.demo {
         let d = demo::ensure(dir.as_ref().unwrap_or(&root))?;
@@ -268,6 +281,9 @@ fn main() -> Result<()> {
     }
     if cli.build_only {
         let shell::Start::Viewer(l) = &start else { anyhow::bail!("--build-only needs one recording") };
+        if cli.cold {
+            cache::evict_from_memory(&l.rec);
+        }
         let rec = Arc::new(oe::Recording::open(&l.rec, cli.stream.as_deref())?);
         let cache = Arc::new(cache::TraceCache::new(rec.clone(), root)?);
         let (p, _) = preset::check(shell::load_preset(&l.preset, &rec)?, &rec);
@@ -281,7 +297,7 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let settings = shell::Settings { cache_root: root, stream: cli.stream, trigger_line: cli.trigger_line, time_base: cli.time_base, play: cli.play };
+    let settings = shell::Settings { cache_root: root, stream: cli.stream, trigger_line: cli.trigger_line, time_base: cli.time_base, play: cli.play, cold: cli.cold };
     let screenshot = cli.screenshot.map(|p| (p, cli.screenshot_after));
     let native = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,

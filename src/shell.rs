@@ -17,6 +17,8 @@ pub struct Settings {
     pub trigger_line: i64,
     pub time_base: Option<f64>,
     pub play: bool,
+    /// --cold: drop each recording's and video's files from the OS's memory before opening them.
+    pub cold: bool,
 }
 
 pub enum Start {
@@ -95,6 +97,12 @@ impl Shell {
     }
 
     fn viewer(&self, ctx: &egui::Context, l: &Launch) -> Result<App> {
+        if self.settings.cold {
+            cache::evict_from_memory(&l.rec);
+            for v in &l.videos {
+                cache::evict_from_memory(v);
+            }
+        }
         let rec = Arc::new(oe::Recording::open(&l.rec, self.settings.stream.as_deref())?);
         let cache = Arc::new(cache::TraceCache::new(rec.clone(), self.settings.cache_root.clone())?);
         let preset = load_preset(&l.preset, &rec)?;
