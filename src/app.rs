@@ -1,6 +1,7 @@
 //! The viewer window (port of syncview/app/main.py): toolbar, video, trace rows, overview strip,
 //! channel table. Traces are drawn by the GPU line renderer in `gpu.rs`; everything else by egui.
 
+use crate::annotations::{self, Annotations};
 use crate::cache::{CacheBuilder, Trace, TraceCache, WindowWorker};
 use crate::filters::MODES;
 use crate::oe::{check_sync, Recording};
@@ -187,6 +188,11 @@ pub struct App {
     /// The right-hand sidebar: which tab, and whether it is open (F2) or collapsed to a rail.
     side_tab: SideTab,
     side_open: bool,
+    /// Annotation labels (from the preset) and this recording's annotated events.
+    labels: Vec<preset::Label>,
+    ann: Annotations,
+    /// The last save error shown, so a failing disk doesn't raise the same dialog every second.
+    save_error: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -309,6 +315,13 @@ fn drag_box(ui: &egui::Ui, a: Rect, id: &str, b: Rect, aspect: Option<f32>, min:
         b
     };
     fit_inside(new, a, aspect)
+}
+
+impl Drop for App {
+    /// Unsaved annotations are written when the viewer closes.
+    fn drop(&mut self) {
+        self.autosave(std::time::Duration::ZERO);
+    }
 }
 
 /// The Clip column: a three-position slider switch (row | chart | none); click or drag a stop.
@@ -462,6 +475,17 @@ impl App {
             file_dialog: None,
             side_tab: SideTab::Channels,
             side_open: true,
+            labels: vec![],
+            ann: Annotations::load(
+                annotations::file_for(&rec.rec_dir),
+                annotations::Header {
+                    recording: rec.rec_dir.display().to_string(),
+                    sample_rate: rec.fs,
+                    first_sample_number: rec.first_sample_number(),
+                    labels: vec![],
+                },
+            ),
+            save_error: None,
             rec,
             cache,
         };
@@ -494,6 +518,10 @@ impl App {
         self.set_span(p.time_base.unwrap_or(self.span));
         if let Some(l) = p.layout {
             self.layout = l;
+        }
+        if !p.labels.is_empty() {
+            self.labels = p.labels;
+            self.ann.header.labels = self.labels.iter().map(preset::Label::describe).collect();
         }
         self.overview = p.overview;
         self.specs = p.channels;
@@ -1114,7 +1142,7 @@ impl App {
 
     fn preset(&self) -> Preset {
         let layout = (self.layout != preset::Layout::default()).then(|| self.layout.clone());
-        Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone(), layout }
+        Preset { time_base: Some(self.span), channels: self.specs.clone(), overview: self.overview.clone(), layout, labels: self.labels.clone() }
     }
 
     /// Open a file dialog (unless one is already open); its answer arrives in `dialog_answered`.
@@ -1212,10 +1240,52 @@ impl App {
 
     /// The Events tab (the list of marked events arrives with annotation).
     fn events_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
-        ui.label(egui::RichText::new("No events yet.").color(LABEL));
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Marked events (bites, chewing and grooming bouts, …) will be listed here, to jump to, edit and delete.").color(MUTED));
+        let name = self.ann.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if let Some(e) = &self.ann.load_error {
+            ui.label(egui::RichText::new(format!("{name} couldn't be read, so nothing will be saved over it:\n{e}")).color(Color32::from_rgb(0xe0, 0x70, 0x60)));
+            return;
+        }
+        let n = self.ann.events.len();
+        ui.label(egui::RichText::new(if n == 0 { "No events yet.".to_string() } else { format!("{n} event{}", if n == 1 { "" } else { "s" }) }).color(LABEL))
+            .on_hover_text(self.ann.path.display().to_string());
+        ui.label(egui::RichText::new(format!("saved in {name}, next to the recording")).small().color(MUTED));
+        ui.separator();
+        let mut jump = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for e in &self.ann.events {
+                let len = if e.is_point() { String::new() } else { format!("  {:.2} s", e.end_s - e.start_s) };
+                let color = self.labels.iter().find(|l| l.name == e.label).and_then(|l| l.color.as_deref()).map(hex).unwrap_or(FG);
+                let r = ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("■").color(color));
+                    ui.label(egui::RichText::new(&e.label).color(LABEL));
+                    ui.label(egui::RichText::new(format!("{}{len}", fmt_time(e.start_s, None))).monospace().small().color(MUTED));
+                });
+                let r = r.response.interact(Sense::click()).on_hover_text(if e.note.is_empty() { "click to go there".to_string() } else { e.note.clone() });
+                if r.clicked() {
+                    jump = Some(e.start_s);
+                }
+            }
+        });
+        if let Some(t) = jump {
+            self.set_time(t);
+        }
+    }
+
+    /// Save the annotations a second after the last change (and say so once if it fails).
+    fn autosave(&mut self, after: std::time::Duration) {
+        if self.ann.load_error.is_some() {
+            return;
+        }
+        match self.ann.save_if_due(after) {
+            Ok(_) => self.save_error = None,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if self.save_error.as_ref() != Some(&msg) {
+                    self.dialogs.push(("Couldn't save the annotations".into(), msg.clone()));
+                    self.save_error = Some(msg);
+                }
+            }
+        }
     }
 
     /// The collapsed sidebar: a thin rail that opens it again, on either tab.
@@ -1837,6 +1907,7 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
             self.side_open = !self.side_open;
         }
+        self.autosave(std::time::Duration::from_secs(1));
         if let Some((what, path)) = crate::dialog::take_answer(&mut self.file_dialog) {
             self.dialog_answered(&ctx, what, path);
         }
@@ -1964,7 +2035,7 @@ mod tests {
 
     #[test]
     fn preset_json_shape() {
-        let p = Preset { time_base: Some(30.0), channels: vec![spec(), Spec::new("CH1", "slow")], overview: None, layout: None };
+        let p = Preset { time_base: Some(30.0), channels: vec![spec(), Spec::new("CH1", "slow")], overview: None, layout: None, labels: vec![] };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["channels"][0]["ref"], "CH6");
         assert_eq!(v["channels"][0]["band"], json!([100.0, 3000.0]));

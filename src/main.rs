@@ -4,6 +4,7 @@
 // Windows: no console window when started by double-click; see attach_console.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod annotations;
 mod app;
 mod cache;
 mod clip;

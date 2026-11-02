@@ -82,6 +82,11 @@ impl Recording {
         self.cont().duration()
     }
 
+    /// Open Ephys's own sample number of row 0 (0 when the recording doesn't say).
+    pub fn first_sample_number(&self) -> i64 {
+        self.cont().first_sample_number().unwrap_or(0)
+    }
+
     pub fn ch(&self, name: &str) -> Option<usize> {
         self.cont().channel_index(name)
     }

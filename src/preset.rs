@@ -87,6 +87,38 @@ pub struct Preset {
     /// Video placement and trace styling (absent = stacked, no outline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
+    /// The annotation labels this project uses (bite, chewing bout, contraction, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Label>,
+}
+
+/// An annotation label: its name, the key that marks it, whether it marks a moment or a stretch,
+/// and its colour ("#rrggbb"; absent: picked from a palette).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    #[serde(default)]
+    pub kind: LabelKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LabelKind {
+    Point,
+    #[default]
+    Interval,
+}
+
+impl Label {
+    /// For the annotations file header: "bite (interval, key B)".
+    pub fn describe(&self) -> String {
+        let kind = if self.kind == LabelKind::Point { "point" } else { "interval" };
+        if self.key.is_empty() { format!("{} ({kind})", self.name) } else { format!("{} ({kind}, key {})", self.name, self.key) }
+    }
 }
 
 /// Where floating videos 1-4 start: the four quarters of the viewing area, top right first.
@@ -162,7 +194,7 @@ pub fn from_recording(rec: &Recording) -> Preset {
         .enumerate()
         .map(|(i, n)| Spec { label: Some((*n).clone()), show: i < MAX_SHOWN, ..Spec::new(n, "hilo") })
         .collect();
-    Preset { time_base: Some(10.0), channels, overview: None, layout: None }
+    Preset { time_base: Some(10.0), channels, overview: None, layout: None, labels: vec![] }
 }
 
 /// Drop rows (and the overview) that refer to channels or modes this recording doesn't have.
