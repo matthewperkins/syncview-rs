@@ -147,6 +147,15 @@ impl Annotations {
         self.touch();
     }
 
+    /// Replace the event with the same id (an edit); false if there is none.
+    pub fn replace(&mut self, e: Event) -> bool {
+        let Some(slot) = self.events.iter_mut().find(|x| x.id == e.id) else { return false };
+        *slot = e;
+        self.sort();
+        self.touch();
+        true
+    }
+
     pub fn get(&self, id: &str) -> Option<&Event> {
         self.events.iter().find(|e| e.id == id)
     }

@@ -200,6 +200,14 @@ pub struct App {
     /// The event just added or restored, and when (drawn brighter for a moment).
     flash: Option<(String, Instant)>,
     annotator: String,
+    /// The event selected in the Events tab (edited there; Delete removes it).
+    selected_event: Option<String>,
+    /// Events tab: show (and step through) only this label's events.
+    event_filter: Option<String>,
+    /// The selected event's note, as being typed (applied when the field loses focus).
+    note_edit: String,
+    /// Scroll the events list to the selected event (after stepping to it with the keys).
+    list_scroll: bool,
     /// The last save error shown, so a failing disk doesn't raise the same dialog every second.
     save_error: Option<String>,
 }
@@ -218,11 +226,26 @@ struct Mark {
     frame: Option<i64>,
 }
 
+/// Move an event's start (or end) to `m`, keeping start <= end.
+fn set_edge(e: &mut annotations::Event, m: Mark, start: bool) {
+    if start {
+        (e.start_s, e.start_sample, e.frame_start) = (m.t, m.sample, m.frame);
+    } else {
+        (e.end_s, e.end_sample, e.frame_end) = (m.t, m.sample, m.frame);
+    }
+    if e.end_s < e.start_s {
+        std::mem::swap(&mut e.start_s, &mut e.end_s);
+        std::mem::swap(&mut e.start_sample, &mut e.end_sample);
+        std::mem::swap(&mut e.frame_start, &mut e.frame_end);
+    }
+}
+
 /// An undoable change to the annotations.
 enum Edit {
     Added(annotations::Event),
-    #[allow(dead_code)] // deleting from the events list arrives with review (step 3)
     Removed(annotations::Event),
+    /// Before, after.
+    Changed(annotations::Event, annotations::Event),
 }
 
 /// At most this many videos at once (e.g. three side views and one from above).
@@ -504,6 +527,10 @@ impl App {
             undo: vec![],
             redo: vec![],
             flash: None,
+            selected_event: None,
+            event_filter: None,
+            note_edit: String::new(),
+            list_scroll: false,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.rec_dir),
@@ -959,7 +986,9 @@ impl App {
             return;
         }
         use egui::Key;
-        // annotation: label keys, Esc (drop the last open interval), undo / redo
+        // annotation: label keys, Esc (drop the last open interval), undo / redo, Ctrl/Cmd+arrows
+        // (previous / next event), Delete (the selected event)
+        let (mut step, mut delete) = (vec![], false);
         let (labels, esc, undo, redo) = ctx.input_mut(|i| {
             let mut hit = vec![];
             for (n, l) in self.labels.iter().enumerate() {
@@ -978,12 +1007,21 @@ impl App {
                         Key::Z if modifiers.shift => redo = true,
                         Key::Z => undo = true,
                         Key::Y => redo = true,
+                        Key::ArrowLeft => step.push(-1),
+                        Key::ArrowRight => step.push(1),
                         _ => {}
                     }
                 }
             }
+            delete = i.consume_key(egui::Modifiers::NONE, Key::Delete) || i.consume_key(egui::Modifiers::NONE, Key::Backspace);
             (hit, i.consume_key(egui::Modifiers::NONE, Key::Escape), undo, redo)
         });
+        for d in step {
+            self.step_event(d);
+        }
+        if delete {
+            self.delete_selected();
+        }
         for n in labels {
             self.label_key(n);
         }
@@ -1329,9 +1367,19 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut self.annotator).desired_width(90.0)).on_hover_text("written with each event you mark");
         });
         ui.separator();
+        // which labels to list (and step through with Ctrl/Cmd+arrows)
+        let shown = self.event_filter.clone().unwrap_or_else(|| "all labels".into());
+        egui::ComboBox::from_id_salt("event_filter").selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(&mut self.event_filter, None, "all labels");
+            for l in &self.labels {
+                ui.selectable_value(&mut self.event_filter, Some(l.name.clone()), &l.name);
+            }
+        });
+        self.selected_event_ui(ui);
+        ui.separator();
         let mut jump = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for e in &self.ann.events {
+            for e in self.ann.events.iter().filter(|e| self.event_filter.as_ref().is_none_or(|f| *f == e.label)) {
                 let len = if e.is_point() { String::new() } else { format!("  {:.2} s", e.end_s - e.start_s) };
                 let color = self.label_color(&e.label);
                 let r = ui.horizontal(|ui| {
@@ -1340,15 +1388,119 @@ impl App {
                     ui.label(egui::RichText::new(&e.label).color(if bright { color } else { LABEL }));
                     ui.label(egui::RichText::new(format!("{}{len}", fmt_time(e.start_s, None))).monospace().small().color(MUTED));
                 });
-                let r = r.response.interact(Sense::click()).on_hover_text(if e.note.is_empty() { "click to go there".to_string() } else { e.note.clone() });
+                let r = r.response.interact(Sense::click()).on_hover_text(if e.note.is_empty() { "click to select it and go there".to_string() } else { e.note.clone() });
+                if self.selected_event.as_ref() == Some(&e.id) {
+                    ui.painter().rect_stroke(r.rect.expand(1.0), 3.0, Stroke::new(1.0, color), egui::StrokeKind::Outside);
+                    if self.list_scroll {
+                        r.scroll_to_me(None);
+                    }
+                }
                 if r.clicked() {
-                    jump = Some(e.start_s);
+                    jump = Some(e.id.clone());
                 }
             }
         });
-        if let Some(t) = jump {
-            self.set_time(t);
+        self.list_scroll = false;
+        if let Some(id) = jump {
+            self.select_event(&id);
         }
+    }
+
+    /// Select an event (and go to its start).
+    fn select_event(&mut self, id: &str) {
+        let Some(e) = self.ann.get(id) else { return };
+        let t = e.start_s;
+        self.selected_event = Some(id.to_string());
+        self.sync_note();
+        self.set_time(t);
+    }
+
+    /// The note field follows the selected event.
+    fn sync_note(&mut self) {
+        self.note_edit = self.selected_event.as_deref().and_then(|id| self.ann.get(id)).map(|e| e.note.clone()).unwrap_or_default();
+    }
+
+    /// Ctrl/Cmd+arrow: the previous / next event (of the filtered label) from the cursor.
+    fn step_event(&mut self, d: i64) {
+        let t = self.t;
+        let want = |e: &&annotations::Event| self.event_filter.as_ref().is_none_or(|f| *f == e.label);
+        let hit = if d > 0 {
+            self.ann.events.iter().filter(want).find(|e| e.start_s > t + 1e-6)
+        } else {
+            self.ann.events.iter().filter(want).rev().find(|e| e.start_s < t - 1e-6)
+        };
+        match hit.map(|e| e.id.clone()) {
+            Some(id) => {
+                self.select_event(&id);
+                self.side_tab = SideTab::Events;
+                self.list_scroll = true;
+            }
+            None => self.status = format!("no {} event {}", self.event_filter.as_deref().unwrap_or("other"), if d > 0 { "after this" } else { "before this" }),
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        let Some(id) = self.selected_event.take() else { return };
+        if let Some(e) = self.ann.remove(&id) {
+            self.status = format!("removed {} at {} (Ctrl/Cmd+Z brings it back)", e.label, fmt_time(e.start_s, None));
+            self.undo.push(Edit::Removed(e));
+            self.redo.clear();
+        }
+        self.sync_note();
+    }
+
+    /// Apply a change to the selected event (undoable).
+    fn change_selected(&mut self, f: impl FnOnce(&mut annotations::Event)) {
+        let Some(before) = self.selected_event.as_deref().and_then(|id| self.ann.get(id)).cloned() else { return };
+        let mut after = before.clone();
+        f(&mut after);
+        if after == before {
+            return;
+        }
+        after.marked_at = annotations::now_utc();
+        self.ann.replace(after.clone());
+        self.undo.push(Edit::Changed(before, after));
+        self.redo.clear();
+    }
+
+    /// The selected event: where it is, its note, its edges set to the current frame, Delete.
+    fn selected_event_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(e) = self.selected_event.as_deref().and_then(|id| self.ann.get(id)).cloned() else { return };
+        ui.add_space(4.0);
+        let c = self.label_color(&e.label);
+        let frames = match (e.frame_start, e.frame_end) {
+            (Some(a), Some(b)) if a != b => format!("  frames {a}–{b}"),
+            (Some(a), _) => format!("  frame {a}"),
+            _ => String::new(),
+        };
+        let span = if e.is_point() { fmt_time(e.start_s, None) } else { format!("{} – {} ({:.2} s)", fmt_time(e.start_s, None), fmt_time(e.end_s, None), e.end_s - e.start_s) };
+        ui.label(egui::RichText::new(format!("{}  {}", e.label, e.id)).color(c));
+        ui.label(egui::RichText::new(format!("{span}{frames}")).small().monospace().color(LABEL));
+        ui.label(egui::RichText::new(format!("{}  {}  {}", e.annotator, e.view, e.marked_at)).small().color(MUTED));
+        let r = ui.add(egui::TextEdit::multiline(&mut self.note_edit).desired_rows(2).desired_width(f32::INFINITY).hint_text("note"));
+        if r.lost_focus() {
+            let note = self.note_edit.clone();
+            self.change_selected(|e| e.note = note);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let here = self.mark_here();
+            if !e.is_point() {
+                if ui.button("Start = here").on_hover_text("move its start to the current frame").clicked() {
+                    self.change_selected(|e| set_edge(e, here, true));
+                }
+                if ui.button("End = here").on_hover_text("move its end to the current frame").clicked() {
+                    self.change_selected(|e| set_edge(e, here, false));
+                }
+            } else if ui.button("Move here").on_hover_text("move it to the current frame").clicked() {
+                self.change_selected(|e| {
+                    set_edge(e, here, true);
+                    set_edge(e, here, false);
+                });
+            }
+            if ui.button("Delete").on_hover_text("remove it (Delete key; Ctrl/Cmd+Z brings it back)").clicked() {
+                self.delete_selected();
+            }
+        });
     }
 
     /// A label's colour (its own, else one from a palette by its place in the list).
@@ -1432,7 +1584,12 @@ impl App {
                 self.flash = Some((e.id.clone(), Instant::now()));
                 self.status = format!("undid removing {} at {}", e.label, fmt_time(e.start_s, None));
             }
+            Edit::Changed(before, _) => {
+                self.ann.replace(before.clone());
+                self.status = format!("undid the change to {} at {}", before.label, fmt_time(before.start_s, None));
+            }
         }
+        self.sync_note();
         self.redo.push(op);
     }
 
@@ -1448,7 +1605,12 @@ impl App {
                 self.ann.remove(&e.id);
                 self.status = format!("redid removing {} at {}", e.label, fmt_time(e.start_s, None));
             }
+            Edit::Changed(_, after) => {
+                self.ann.replace(after.clone());
+                self.status = format!("redid the change to {} at {}", after.label, fmt_time(after.start_s, None));
+            }
         }
+        self.sync_note();
         self.undo.push(op);
     }
 
@@ -1751,14 +1913,18 @@ impl App {
             }
             let c = self.label_color(&e.label);
             let bright = self.flash.as_ref().is_some_and(|(id, at)| *id == e.id && at.elapsed().as_secs_f32() < 0.8);
+            let selected = self.selected_event.as_ref() == Some(&e.id);
             if e.is_point() {
                 let x = tx_abs(e.start_s);
-                ev_painter.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], Stroke::new(if bright { 3.0 } else { 1.5 }, c));
+                ev_painter.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], Stroke::new(if bright || selected { 3.0 } else { 1.5 }, c));
             } else {
                 let (a, b) = (tx_abs(e.start_s), tx_abs(e.end_s).max(tx_abs(e.start_s) + 2.0));
                 let band = Rect::from_min_max(Pos2::new(a, top), Pos2::new(b, bottom));
                 ev_painter.rect_filled(band, 0.0, c.gamma_multiply(if bright { 0.45 } else { 0.16 }));
                 ev_painter.rect_filled(Rect::from_min_max(band.min, Pos2::new(b, top + 3.0)), 0.0, c);
+                if selected {
+                    ev_painter.rect_stroke(band, 0.0, Stroke::new(1.5, c), egui::StrokeKind::Inside);
+                }
                 if b - a > 40.0 {
                     ev_painter.text(Pos2::new(a + 3.0, top + 4.0), Align2::LEFT_TOP, &e.label, FontId::proportional(10.5), c);
                 }

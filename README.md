@@ -176,7 +176,10 @@ label's key: the first press starts an interval and lights its chip, the second 
 interval per label, so bites can be marked inside an open chewing bout); Esc cancels the last open
 one, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes. Marks land on the first video's frames. Events
 show as bands on the chart and bars on the overview strip, and are listed in the **Events** tab
-(click one to go there), with the annotator's name. They are saved a second after each change in
+(click one to select it and go there), with the annotator's name. Ctrl/Cmd+← / → steps to the
+previous / next event (only one label's, if the tab's filter says so); the selected event can be
+given a note, have its start or end moved to the current frame (**Start = here**, **End = here**),
+or be removed (Delete). Every change can be undone. They are saved a second after each change in
 `syncview_annotations.csv` in the recording folder: one row per event, with times in seconds and
 sample indexes from the recording's first sample (as Kilosort counts), so they line up with sorted
 spikes. Each save also rewrites `syncview_overlaps.csv`, listing every pair of overlapping events
