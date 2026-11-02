@@ -39,9 +39,9 @@ pub fn frame_pts_progress(path: &Path, index_dir: &Path, progress: &dyn Fn(f32))
         return Ok(v);
     }
     // opening reads the container's frame tables (for a fragmented MP4, thousands of small ones,
-    // spread through the file): no fraction to report yet
-    progress(-1.0);
-    let mut ictx = ff::format::input(&path)?;
+    // spread through the file, which is most of the work): report how far into the file it is
+    progress(0.0);
+    let mut ictx = open_with_progress(&path, progress)?;
     let si = ictx.streams().best(ff::media::Type::Video).context("no video stream")?.index();
     let mut pts = match pts_from_demuxer_index(&mut ictx, si) {
         Some(p) => p,
@@ -89,6 +89,55 @@ fn pts_duration(path: &Path, pts: &[i64]) -> Option<f64> {
     let (a, b) = (*pts.first()?, *pts.last()?);
     let frame = if pts.len() > 1 { (b - a) as f64 / (pts.len() - 1) as f64 } else { 0.0 };
     Some(((b - a) as f64 + frame) * tb.0 as f64 / tb.1.max(1) as f64)
+}
+
+/// Open a video as `ff::format::input` does, calling `progress` with how far into the file FFmpeg
+/// has read (0 to 1) while it opens it: for a fragmented MP4 it reads every fragment's tables,
+/// front to back, which on a slow disk takes long. (FFmpeg calls its interrupt callback during
+/// reads; that's where the position is looked at.)
+fn open_with_progress(path: &Path, progress: &dyn Fn(f32)) -> Result<ff::format::context::Input> {
+    struct Watch<'a> {
+        ctx: *mut ff::ffi::AVFormatContext,
+        size: f64,
+        progress: &'a dyn Fn(f32),
+        last: std::cell::Cell<f32>,
+    }
+    unsafe extern "C" fn tick(opaque: *mut std::ffi::c_void) -> std::ffi::c_int {
+        // SAFETY: `opaque` is the Watch below, alive until the callback is removed again
+        let w = unsafe { &*(opaque as *const Watch) };
+        let pb = unsafe { (*w.ctx).pb };
+        if !pb.is_null() {
+            let f = ((unsafe { (*pb).pos } as f64 / w.size) as f32).clamp(0.0, 1.0);
+            if f - w.last.get() >= 0.005 {
+                w.last.set(f);
+                (w.progress)(f);
+            }
+        }
+        0 // carry on
+    }
+    let size = std::fs::metadata(path)?.len().max(1) as f64;
+    let c_path = CString::new(path.to_str().context("the video's path isn't valid UTF-8")?)?;
+    // SAFETY: plain FFmpeg calls, as ff::format::input makes them; the callback is removed before
+    // `watch` goes out of scope, and the context is handed to (and freed by) ff's Input
+    unsafe {
+        let mut ctx = ff::ffi::avformat_alloc_context();
+        if ctx.is_null() {
+            bail!("could not allocate a format context");
+        }
+        let watch = Watch { ctx, size, progress, last: std::cell::Cell::new(-1.0) };
+        (*ctx).interrupt_callback = ff::ffi::AVIOInterruptCB { callback: Some(tick), opaque: &watch as *const Watch as *mut std::ffi::c_void };
+        let r = ff::ffi::avformat_open_input(&mut ctx, c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        if r < 0 {
+            return Err(ff::Error::from(r).into()); // FFmpeg has freed the context
+        }
+        let r = ff::ffi::avformat_find_stream_info(ctx, std::ptr::null_mut());
+        (*ctx).interrupt_callback = ff::ffi::AVIOInterruptCB { callback: None, opaque: std::ptr::null_mut() };
+        if r < 0 {
+            ff::ffi::avformat_close_input(&mut ctx);
+            return Err(ff::Error::from(r).into());
+        }
+        Ok(ff::format::context::Input::wrap(ctx))
+    }
 }
 
 /// Open a video. (For a fragmented MP4 FFmpeg reads every fragment's tables at open, which for a
