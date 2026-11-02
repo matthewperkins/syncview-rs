@@ -208,6 +208,9 @@ pub struct App {
     note_edit: String,
     /// Scroll the events list to the selected event (after stepping to it with the keys).
     list_scroll: bool,
+    /// Audit mode: score from the video alone (traces and earlier marks hidden; events marked now
+    /// record view "video").
+    audit: bool,
     /// The last save error shown, so a failing disk doesn't raise the same dialog every second.
     save_error: Option<String>,
 }
@@ -531,6 +534,7 @@ impl App {
             event_filter: None,
             note_edit: String::new(),
             list_scroll: false,
+            audit: false,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.rec_dir),
@@ -1376,10 +1380,36 @@ impl App {
             }
         });
         self.selected_event_ui(ui);
+        let agreement = annotations::agreement(&self.ann.events);
+        if !agreement.is_empty() && !self.audit {
+            egui::CollapsingHeader::new("Agreement: video-only vs normal").default_open(false).show(ui, |ui| {
+                for a in &agreement {
+                    let ms = |d: Option<f64>| d.map(|s| format!("{:.0} ms", s * 1000.0)).unwrap_or_else(|| "–".into());
+                    ui.label(egui::RichText::new(&a.label).color(self.label_color(&a.label)));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} video-only, {} normal, {} matched\nonly video-only: {}   only normal: {}\nmean onset diff {}, offset diff {}\nover {} – {}",
+                            a.audit, a.normal, a.matched, a.audit - a.matched, a.normal - a.matched,
+                            ms(a.onset_diff), ms(a.offset_diff), fmt_time(a.span.0, None), fmt_time(a.span.1, None)
+                        ))
+                        .small()
+                        .color(LABEL),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Events match when they overlap, or start within {:.0} ms; each pairs with the closest onset.",
+                        annotations::MATCH_TOLERANCE_S * 1000.0
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
+            });
+        }
         ui.separator();
         let mut jump = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for e in self.ann.events.iter().filter(|e| self.event_filter.as_ref().is_none_or(|f| *f == e.label)) {
+            for e in self.ann.events.iter().filter(|e| self.shows(e) && self.event_filter.as_ref().is_none_or(|f| *f == e.label)) {
                 let len = if e.is_point() { String::new() } else { format!("  {:.2} s", e.end_s - e.start_s) };
                 let color = self.label_color(&e.label);
                 let r = ui.horizontal(|ui| {
@@ -1406,6 +1436,11 @@ impl App {
         }
     }
 
+    /// Whether an event is shown: in audit mode only the audit pass's own marks are.
+    fn shows(&self, e: &annotations::Event) -> bool {
+        !self.audit || e.view == "video"
+    }
+
     /// Select an event (and go to its start).
     fn select_event(&mut self, id: &str) {
         let Some(e) = self.ann.get(id) else { return };
@@ -1423,7 +1458,7 @@ impl App {
     /// Ctrl/Cmd+arrow: the previous / next event (of the filtered label) from the cursor.
     fn step_event(&mut self, d: i64) {
         let t = self.t;
-        let want = |e: &&annotations::Event| self.event_filter.as_ref().is_none_or(|f| *f == e.label);
+        let want = |e: &&annotations::Event| self.shows(e) && self.event_filter.as_ref().is_none_or(|f| *f == e.label);
         let hit = if d > 0 {
             self.ann.events.iter().filter(want).find(|e| e.start_s > t + 1e-6)
         } else {
@@ -1555,7 +1590,7 @@ impl App {
             video: self.cam0().map(|c| c.name()).unwrap_or_default(),
             note: String::new(),
             annotator: self.annotator.trim().to_string(),
-            view: "video+emg".into(),
+            view: if self.audit { "video".into() } else { "video+emg".into() },
             marked_at: annotations::now_utc(),
             kind: if l.kind == preset::LabelKind::Point { "point".into() } else { "interval".into() },
             extra: Default::default(),
@@ -1638,6 +1673,17 @@ impl App {
                 chip.show(ui, |ui| ui.label(egui::RichText::new(text).color(if open.is_some() { LABEL } else { c }).size(12.5)))
                     .response
                     .on_hover_text(format!("{}: {kind}", l.name));
+            }
+            let was = self.audit;
+            ui.checkbox(&mut self.audit, "audit: video only").on_hover_text(
+                "Score from the video alone: the traces and earlier marks are hidden, and events marked now are\n\
+                 saved with view \"video\". Scoring a stretch both ways shows (Events tab) how much the traces\n\
+                 shaped which events were called.",
+            );
+            if self.audit != was {
+                self.selected_event = None;
+                self.sync_note();
+                self.status = if self.audit { "audit mode: traces and earlier marks hidden".into() } else { "audit mode off".into() };
             }
             if self.ann.load_error.is_some() {
                 ui.label(egui::RichText::new("annotations read-only (see Events)").color(Color32::from_rgb(0xe0, 0x70, 0x60)));
@@ -1879,6 +1925,9 @@ impl App {
                         need_window.push(self.rows[i].spec.clone());
                     }
                 }
+                Some(_) if self.audit => {
+                    painter.text(r.center(), Align2::CENTER_CENTER, "hidden (audit: video only)", small.clone(), MUTED);
+                }
                 Some(tr) => {
                     xs.clear();
                     ys.clear();
@@ -1909,7 +1958,7 @@ impl App {
         // annotated events: bands for intervals, ticks for points; open intervals run to the cursor
         let ev_painter = ui.painter_at(Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom)));
         let tx_abs = |v: f64| x0 + ((v - t_lo) / span) as f32 * plot_w;
-        for e in &self.ann.events {
+        for e in self.ann.events.iter().filter(|e| self.shows(e)) {
             if e.end_s < t_lo || e.start_s > t_hi {
                 continue;
             }
@@ -2026,7 +2075,9 @@ impl App {
                         .map(|(x, y)| [((x / dur) * 2.0 - 1.0) as f32, (((*y as f64 - lo) / (hi - lo)) * 2.0 - 1.0) as f32])
                         .collect();
                     let cb = LineStrip { slot: OVERVIEW_SLOT, points, color: FG, px: px_for(plot, ppp), outline: None };
-                    ui.painter().with_clip_rect(plot).add(egui_wgpu::Callback::new_paint_callback(plot, cb));
+                    if !self.audit {
+                        ui.painter().with_clip_rect(plot).add(egui_wgpu::Callback::new_paint_callback(plot, cb));
+                    }
                     // a few y labels
                     let target = (hi - lo) / 2.0;
                     let e = 10f64.powf(target.log10().floor());
@@ -2051,7 +2102,7 @@ impl App {
         p.line_segment([Pos2::new(tx(self.t), top), Pos2::new(tx(self.t), bottom)], Stroke::new(1.0, Color32::WHITE));
         // time axis
         // annotated events along the bottom of the strip
-        for e in &self.ann.events {
+        for e in self.ann.events.iter().filter(|e| self.shows(e)) {
             let (a, b) = (tx(e.start_s), tx(e.end_s).max(tx(e.start_s) + 1.5));
             p.rect_filled(Rect::from_min_max(Pos2::new(a, bottom - 7.0), Pos2::new(b, bottom - 1.0)), 0.0, self.label_color(&e.label));
         }

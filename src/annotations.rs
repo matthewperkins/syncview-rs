@@ -327,6 +327,61 @@ pub fn overlaps(events: &[Event]) -> Vec<(usize, usize, f64, f64)> {
     out
 }
 
+/// How a label's video-only (audit) scoring compares with its normal scoring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Agreement {
+    pub label: String,
+    /// The stretch the audit pass covers (first audit event's start to the last one's end);
+    /// normal events are compared only there.
+    pub span: (f64, f64),
+    pub audit: usize,
+    pub normal: usize,
+    pub matched: usize,
+    /// Mean |difference| of matched events' onsets and offsets, in seconds.
+    pub onset_diff: Option<f64>,
+    pub offset_diff: Option<f64>,
+}
+
+/// Two passes match an event when they overlap, or for points (or very short marks) when their
+/// onsets are within this many seconds.
+pub const MATCH_TOLERANCE_S: f64 = 0.1;
+
+/// For each label scored in audit mode (view "video"): the audit events against the normal ones
+/// in the same stretch, paired greedily in time order by the closest onset.
+pub fn agreement(events: &[Event]) -> Vec<Agreement> {
+    let mut labels: Vec<&str> = events.iter().filter(|e| e.view == "video").map(|e| e.label.as_str()).collect();
+    labels.sort();
+    labels.dedup();
+    labels
+        .into_iter()
+        .map(|label| {
+            let audit: Vec<&Event> = events.iter().filter(|e| e.label == label && e.view == "video").collect();
+            let span = (audit.iter().map(|e| e.start_s).fold(f64::INFINITY, f64::min), audit.iter().map(|e| e.end_s).fold(f64::NEG_INFINITY, f64::max));
+            let normal: Vec<&Event> =
+                events.iter().filter(|e| e.label == label && e.view != "video" && e.end_s >= span.0 && e.start_s <= span.1).collect();
+            let mut used = vec![false; normal.len()];
+            let (mut on, mut off, mut matched) = (0.0, 0.0, 0usize);
+            for a in &audit {
+                let best = normal
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, n)| {
+                        !used[*j] && ((n.start_s < a.end_s && a.start_s < n.end_s) || (n.start_s - a.start_s).abs() <= MATCH_TOLERANCE_S)
+                    })
+                    .min_by(|(_, x), (_, y)| (x.start_s - a.start_s).abs().total_cmp(&(y.start_s - a.start_s).abs()));
+                if let Some((j, n)) = best {
+                    used[j] = true;
+                    matched += 1;
+                    on += (n.start_s - a.start_s).abs();
+                    off += (n.end_s - a.end_s).abs();
+                }
+            }
+            let mean = |x: f64| (matched > 0).then(|| x / matched as f64);
+            Agreement { label: label.to_string(), span, audit: audit.len(), normal: normal.len(), matched, onset_diff: mean(on), offset_diff: mean(off) }
+        })
+        .collect()
+}
+
 fn overlaps_csv(events: &[Event], from: &Path) -> Result<Vec<u8>> {
     let head = format!(
         "# syncview {}: every pair of overlapping events in {}, same-label pairs first.\n\
@@ -473,6 +528,30 @@ mod tests {
         let n_chew_bite = o.iter().filter(|(a, b, ..)| (es[*a].label == "chewing bout") ^ (es[*b].label == "chewing bout") && (es[*a].label == "bite" || es[*b].label == "bite")).count();
         assert_eq!(n_chew_bite, 2);
         assert_eq!(o.len(), 1 + 1 + 1 + 2 + 1);
+    }
+
+    #[test]
+    fn agreement_pairs_audit_and_normal_passes() {
+        let with_view = |label: &str, a: f64, b: f64, view: &str| Event { view: view.into(), ..ev(label, a, b) };
+        let es = vec![
+            // normal pass (video + EMG)
+            with_view("bite", 10.00, 10.15, "video+emg"),
+            with_view("bite", 20.00, 20.12, "video+emg"),
+            with_view("bite", 30.00, 30.10, "video+emg"), // missed in the audit pass
+            with_view("bite", 90.00, 90.10, "video+emg"), // outside the audited stretch: not compared
+            // audit pass (video only), 10-35 s
+            with_view("bite", 10.03, 10.18, "video"),
+            with_view("bite", 20.05, 20.20, "video"),
+            with_view("bite", 34.90, 35.00, "video"), // not in the normal pass
+            with_view("chewing bout", 5.0, 9.0, "video+emg"),
+        ];
+        let a = agreement(&es);
+        assert_eq!(a.len(), 1);
+        let b = &a[0];
+        assert_eq!((b.label.as_str(), b.audit, b.normal, b.matched), ("bite", 3, 3, 2));
+        assert_eq!(b.span, (10.03, 35.0));
+        assert!((b.onset_diff.unwrap() - 0.04).abs() < 1e-9, "{:?}", b.onset_diff);
+        assert!((b.offset_diff.unwrap() - 0.055).abs() < 1e-9, "{:?}", b.offset_diff);
     }
 
     #[test]

@@ -179,7 +179,11 @@ show as bands on the chart and bars on the overview strip, and are listed in the
 (click one to select it and go there), with the annotator's name. Ctrl/Cmd+← / → steps to the
 previous / next event (only one label's, if the tab's filter says so); the selected event can be
 given a note, have its start or end moved to the current frame (**Start = here**, **End = here**),
-or be removed (Delete). Every change can be undone. They are saved a second after each change in
+or be removed (Delete). Every change can be undone. **Audit mode** (the "audit: video only" box in the
+strip) hides the traces and earlier marks, so a stretch can be scored from the video alone; events
+marked then are saved with `view` = `video`. Once a label has been scored both ways, the Events tab
+shows how the passes agree: events in each, matched pairs (overlapping, or starting within 100 ms),
+and the mean onset and offset differences over the audited stretch. They are saved a second after each change in
 `syncview_annotations.csv` in the recording folder: one row per event, with times in seconds and
 sample indexes from the recording's first sample (as Kilosort counts), so they line up with sorted
 spikes. Each save also rewrites `syncview_overlaps.csv`, listing every pair of overlapping events
