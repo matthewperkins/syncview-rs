@@ -2,11 +2,9 @@
 
 # syncview-rs
 
-A Rust port of the Python [syncview](https://github.com/matthewperkins/syncview) (this repository
-was called syncviewR before v0.2, and the command `syncviewr`): view Open Ephys recordings
-side by side with a behaviour video, frame-locked to the camera trigger. Built with
-[egui](https://github.com/emilk/egui)/eframe for the interface, [wgpu](https://wgpu.rs) (Vulkan,
-Metal, DirectX) for drawing the traces, and FFmpeg (`ffmpeg-next`) for video.
+**Watch Open Ephys recordings and behaviour video together, frame by frame, and mark what the
+animal does.** Each video frame is locked to its camera trigger, so the traces under the cursor are
+what was happening in the frame on screen.
 
 ![syncview on macOS: video frame-locked to masseter and digastric EMG and antrum and duodenum slow
 waves, with the channel table and a whole-session slow-wave power overview](docs/screenshot-macos.png)
@@ -15,10 +13,53 @@ waves, with the channel table and a whole-session slow-wave power overview](docs
 duodenum slow waves) with the antrum's slow-wave power across the excerpt (bottom; the shaded box is
 the current view).*
 
-MIT-licensed (see `LICENSE`). Written mostly by an AI model; see [Provenance](#provenance).
+- **Fast:** filters a 2-hour, 16-channel session once (about 5 s), then scrolls and zooms at the
+  display's refresh rate.
+- **Up to four cameras**, each locked to its own TTL line.
+- **Annotation:** mark bites, bouts, contractions… from the keyboard; saved as CSV whose sample
+  indexes line up with spike-sorter output.
+- **Layout:** video above the chart, or either floating over the other; per-row trace clipping.
+- **Clip export:** video with the traces scrolling underneath, as MP4.
+- macOS, Windows and Linux; MIT-licensed (`LICENSE`).
 
-**Status:** everything in the Python version is ported: the viewer, the channel editor and clip
-export. It reads the same recordings and presets (and NWB recordings too).
+## Quick start
+
+1. **Install**
+   - **macOS (Apple silicon):** in Terminal,
+     ```bash
+     cd ~/Downloads && curl -L -O https://github.com/matthewperkins/syncview-rs/releases/latest/download/syncview-macos-arm64.zip \
+       && unzip -o syncview-macos-arm64.zip && mv syncview.app /Applications/
+     ```
+   - **Windows (x64):** unzip `syncview-windows-x64.zip` from the
+     [latest release](https://github.com/matthewperkins/syncview-rs/releases/latest) and run `syncview.exe`
+     (first time: *More info* → *Run anyway*).
+   - **Linux:** `cargo install --git https://github.com/matthewperkins/syncview-rs --features static-ffmpeg`,
+     then `syncview --install-desktop` (details in [Install](#install)).
+2. **Open a session:** drag its folder (recording, videos and preset JSON together) onto the window,
+   or run `syncview /path/to/session`.
+3. **No data at hand?** Click **Try the demo** on the start page.
+
+## Cheat sheet
+
+| To | Keys / mouse |
+|---|---|
+| Step one video frame | ← / → (Shift: 10 % of the view) |
+| Play / pause, speed | Space, `[` / `]` |
+| Zoom time | scroll, or `+` / `-` |
+| Pan time | drag, sideways swipe, or Shift+scroll |
+| Page, start, end | PgUp / PgDn, Home / End; click or drag the overview strip to jump |
+| Scale one row / reset it | ⌘ or Ctrl + scroll over the row / double-click it |
+| Hide the sidebar | F2 |
+| Mark an event | its label's key at the start, again at the end (labels shown under the toolbar) |
+| Mark with the other hand | Shift + key primes a label; the key left of `1` (`` ` ``) stamps it |
+| Cancel an open event / undo / redo | Esc / Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS) |
+| Go through events | ↑ / ↓ in the Events tab; Ctrl/Cmd + ← / → by time; Delete removes the selected one |
+
+## Contents
+
+[Install](#install) · [Try it without a rig](#try-it-without-a-rig) · [Opening recordings](#opening-recordings) ·
+[The viewer](#the-viewer) · [Annotating events](#annotating-events) · [Export a clip](#export-a-clip) ·
+[How it draws](#how-it-draws) · [Checked](#checked) · [About](#about)
 
 ## Install
 
@@ -49,15 +90,16 @@ Security → Open Anyway.
 **Prebuilt (Windows, x64).** Download `syncview-windows-x64.zip` from the
 [latest release](https://github.com/matthewperkins/syncview-rs/releases/latest), unzip it and
 double-click `syncview.exe` (right-click → *Pin to Start* to keep it in the Start menu), or run it
-from PowerShell (`.\syncview.exe --demo`). The build is
-not code-signed, so the first time Windows shows "Windows protected your PC": click *More info* →
-*Run anyway*. Linux and Intel Macs build from source as below.
+from PowerShell (`.\syncview.exe --demo`). The build is not code-signed, so the first time Windows
+shows "Windows protected your PC": click *More info* → *Run anyway*. Linux and Intel Macs build
+from source as below.
 
 Both prebuilt binaries are built by GitHub Actions from the tagged commit
 (`.github/workflows/release.yml`).
 
-**From source.** You need Rust (1.89 or newer) and a C compiler. The `static-ffmpeg` option compiles FFmpeg into
-syncview, so nothing else is needed and the program keeps working when system packages change.
+**From source.** You need Rust (1.89 or newer) and a C compiler. The `static-ffmpeg` option compiles
+FFmpeg into syncview, so nothing else is needed and the program keeps working when system packages
+change.
 
 ```bash
 # macOS (once): Apple's compiler tools and Rust
@@ -83,45 +125,45 @@ From a checkout: `cargo build --release` gives `target/release/syncview`.
 
 ## Try it without a rig
 
-Click **Try the demo** on the start page, or run
+Click **Try the demo** on the start page, or run `syncview --demo`. Either writes a synthetic
+five-minute recording, a matching cartoon video and a preset (~100 MB, about 10 s, first run only)
+into the cache folder, then opens them.
 
-```bash
-syncview --demo
-```
+It contains a chewing jaw (masseter and digastric EMG, a jaw-position sensor and a bipolar masseter
+pair whose reference wire carries only hum and movement artefact), antral slow waves that grow after
+each meal, duodenal slow waves, and mains hum for the notch. Each video frame shows its frame number
+and its trigger's time, so the sync can be checked by eye. `syncview --demo DIR` writes it into DIR
+instead. The folder is an ordinary Open Ephys recording, so Python syncview opens it too (see its
+`README.txt`).
 
-Either writes a synthetic five-minute recording, a matching cartoon video and a preset (~100 MB, about
-10 s, first run only) into the cache folder, then opens them. It contains a chewing jaw (masseter and
-digastric EMG, a jaw-position sensor and a bipolar masseter pair whose reference wire carries only
-hum and movement artefact), antral slow waves that grow after each meal, duodenal slow waves, and
-mains hum for the notch. Each video frame shows its frame number and its trigger's time, so the
-sync can be checked by eye. `syncview --demo DIR` writes it into DIR instead. The folder is an
-ordinary Open Ephys recording, so Python syncview opens it too (see its `README.txt`).
-
-## Run
+## Opening recordings
 
 ```bash
 syncview                          # start page: drop a folder and/or a video, or try the demo
-syncview /path/to/folder          # finds the recording, video and preset inside it
+syncview /path/to/folder          # finds the recording, videos and preset inside it
 ```
 
-**Start page.** Drag an Open Ephys folder onto the window, or click *Choose folder…*. The folder
-can be a whole day's session, a Record Node or one recording. If it holds several recordings, a
-list opens: move with the Up and Down arrow keys and press Enter to open one. Each recording
-shows its length, channels, start time and camera triggers. If the folder holds several videos,
-a second list asks which go with the recording: Enter opens the highlighted one (or none), and
-Space or the box beside each video ticks several cameras (up to 4) to open together. You can drop one video along with
-the folder, or before it (it's shown with a preview frame); dropping several videos at once is
-refused. If the video's frame count and the recording's camera triggers differ by more than 2, a
-warning says so before the viewer opens: open anyway, open without the video, or go back. A preset JSON at the top of
-the folder is used. While viewing, drop a video on the window to attach it, or drop another folder
-to go back to the start page with it.
+### The start page
 
-**A folder on the command line** works the same way. syncview searches it for Open Ephys
-recordings (folders containing `structure.oebin`, or `.nwb` files), videos (`.mp4`, `.mov`, `.avi`,
-`.mkv`) and a preset JSON at its top level (if there are several, the one named `preset.json`). With
-one recording and at most one video it opens them straight away. Otherwise the start page asks.
-In Terminal, you can type `syncview ` and drag the folder in from Finder. To skip the search,
-name the files:
+- **Drag an Open Ephys folder** onto the window, or click *Choose folder…*. It can be a whole day's
+  session, a Record Node or one recording.
+- **Several recordings:** a list opens; Up / Down and Enter pick one. Each shows its length,
+  channels, start time and camera triggers.
+- **Several videos:** a second list asks which go with the recording. Enter opens the highlighted
+  one (or none); Space or the box beside each video ticks several cameras (up to 4).
+- **One video** can be dropped with the folder, or before it (it's shown with a preview frame).
+- **Sync check:** if a video's frame count and its camera triggers differ by more than 2, a warning
+  says so first: open anyway, open without that video, or go back.
+- **While viewing,** drop a video on the window to add it, or another folder to go back to the start
+  page with it.
+
+### From the command line
+
+A folder works as on the start page: syncview searches it for Open Ephys recordings (folders
+containing `structure.oebin`, or `.nwb` files), videos (`.mp4`, `.mov`, `.avi`, `.mkv`) and a
+preset JSON at its top level (if there are several, the one named `preset.json`). With one recording
+and at most one video it opens them straight away; otherwise the start page asks. In Terminal you
+can type `syncview ` and drag the folder in from Finder. To skip the search, name the files:
 
 ```bash
 syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
@@ -131,7 +173,7 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 
 | option | default | |
 |---|---|---|
-| `FOLDER` | | a folder to search for the recording, video and preset (above) |
+| `FOLDER` | | a folder to search for the recording, videos and preset (above) |
 | `--rec FOLDER` | none (start page) | Open Ephys recording folder (contains `structure.oebin`) or `.nwb` file |
 | `--video FILE` | none | video recorded during this recording; repeat for several cameras (up to 4) |
 | `--preset FILE.json` | built from the recording | same JSON as Python syncview |
@@ -139,74 +181,115 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 | `--trigger-line N` | `1` | TTL line with one pulse per video frame |
 | `--cache FOLDER` | `$SYNCVIEW_RS_CACHE`, else `~/.cache/syncview-rs` (Linux), `~/Library/Caches/syncview-rs` (macOS) | filtered traces |
 | `--time S`, `--time-base S`, `--play` | | initial position, view width, start playing |
+| `--install-desktop` | | Linux: add syncview to the application launcher |
 
-Controls are as in syncview: scroll = zoom time; sideways swipe, Shift+scroll or drag = pan;
-⌘/Ctrl+scroll = scale one row's Y, double-click = reset it; click/drag the overview strip to jump;
-←/→ one video frame (Shift: 10 % of the view), PgUp/PgDn, Home/End, Space play, [ / ] speed, +/- zoom.
-**F2** hides or shows the sidebar on the right (tabs **Channels** and **Events**); hidden, it leaves a
-thin rail to bring it back, and the video and chart get the full width.
+## The viewer
 
-**Channel table** (right): Show, Label, Ch, Ref (bipolar reference), Mode, Low/High Hz (blank =
-no filter edge), Notch (e.g. `60` or `60,180`), DSP wzrd (`order=3 smooth_ms=10 env_lp=40 plot_fs=1000
-win_s=30`), Y range (`auto` or `lo, hi`), Clip (a three-position switch: a trace that leaves its Y
-range is cut off at its own row, at the chart's edges, or nowhere, so it can also draw over the
-video and the overview strip; it keeps its row's scale). Text fields apply on Enter or when you click away; input
-that doesn't parse reverts. Changing a row's mode resets its band and DSP wzrd settings to that mode's
-defaults (Python syncview keeps the old band). Click a row's number to select it for Up / Down /
-Remove and as the template for Add. **Load…/Save…** read and write presets in the Python format
-(time base, rows, overview); **Video…** attaches a video.
+The [cheat sheet](#cheat-sheet) lists the keys. The sidebar on the right has two tabs, **Channels**
+and **Events**; F2 hides it to a thin rail so the video and chart get the full width.
 
-**Several cameras.** Up to four videos can play together, each locked to its own TTL line (line 1,
-or `--trigger-line`, unless changed). **Videos** in the toolbar lists them, with each one's TTL
-line, Remove and Add video…; dropping a video on the window adds it. The first video sets the frame
-number, frame stepping (←/→) and clip export.
+### Channel table
 
-**Layout.** By default the videos sit side by side above the chart. **Float video** turns each video
-into a box over the chart, **Float chart** turns the chart into a box over the video, and with both on each
-is a box of its own; the chart is always drawn on top. While the padlock is open, drag a box to
-move it and its bottom-right corner to resize it; lock it and drags pan time again (the wheel
-zooms either way). **dim** darkens the video where the chart covers it, and **outline** draws a
-dark edge under every trace so it stands out over the video. Presets save the clip settings and
-the layout too; the Python version ignores them.
+One row per trace: Show, Label, Ch, Ref (bipolar reference), Mode, Low/High Hz (blank = no filter
+edge), Notch (e.g. `60` or `60,180`), DSP wzrd (`order=3 smooth_ms=10 env_lp=40 plot_fs=1000
+win_s=30`), Y range (`auto` or `lo, hi`), and Clip.
 
-**Annotating events.** The strip under the toolbar lists the annotation labels, each with its key
-(default: B bite, C chewing bout, O oro-manual phase, G grooming bout, D drinking, S sniffing,
-X gastric episode; a preset's `labels` replace them). Step to the frame with ←/→ and press a
-label's key: the first press starts an interval and lights its chip, the second ends it (one open
-interval per label, so bites can be marked inside an open chewing bout); Esc cancels the last open
-one, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes. To keep one hand on the video, **prime** a label
-with Shift + its key (or click its chip), then press the **stamp** key, the one left of `1` (`` ` ``
-on US keyboards, found by position), to open and close it with the other hand; while playing, a
-stamp lands on the frame on screen. With nothing open, Esc unprimes. Marks land on the first
-video's frames. Events
-show as bands on the chart and bars on the overview strip, and are listed in the **Events** tab
-(click one to select it and go there), with the annotator's name. Ctrl/Cmd+← / → steps to the
-previous / next event (only one label's, if the tab's filter says so), and with the Events tab
-showing, ↑ / ↓ move the selection up and down the list; the selected event can be
-given a note, have its start or end moved to the current frame (**Start = here**, **End = here**),
-or be removed (Delete). Every change can be undone. **Audit mode** (the "audit: video only" box in the
-strip) hides the traces and earlier marks, so a stretch can be scored from the video alone; events
-marked then are saved with `view` = `video`. Once a label has been scored both ways, the Events tab
-shows how the passes agree: events in each, matched pairs (overlapping, or starting within 100 ms),
-and the mean onset and offset differences over the audited stretch. They are saved a second after each change in
-`syncview_annotations.csv` in the recording folder: one row per event, with times in seconds and
-sample indexes from the recording's first sample (as Kilosort counts), so they line up with sorted
-spikes. Each save also rewrites `syncview_overlaps.csv`, listing every pair of overlapping events
-(same-label pairs first, to spot double marks).
+- **Clip** is a three-position switch: a trace that leaves its Y range is cut off at its own row, at
+  the chart's edges, or nowhere (it can then draw over the video and the overview strip); it keeps
+  its row's scale either way.
+- Text fields apply on Enter or when you click away; input that doesn't parse reverts.
+- Changing a row's mode resets its band and DSP wzrd settings to that mode's defaults (Python
+  syncview keeps the old band).
+- Click a row's number to select it for Up / Down / Remove, and as the template for Add.
+- **Load…/Save…** read and write presets in the Python format (time base, rows, overview), plus
+  syncview-rs's own clip settings, layout and annotation labels, which the Python version ignores.
+- Rows named alike apart from a trailing number (masseter1 … masseter4, antrum 1 … antrum 4) share a
+  colour; a preset's own `color` wins.
 
-**Rows of one muscle share a colour.** Rows named alike apart from a trailing number
-(masseter1 … masseter4, antrum 1 … antrum 4) get the same colour; a preset's own `color` wins.
+### Several cameras
 
-**Sharing a cache with Python syncview.** Cache entries use the same keys and layout, so
-`--cache` pointed at a Python syncview cache folder reuses its filtered traces and video indexes
-(and vice versa, untested in that direction since v0.1.6: the Rust port now stores traces as float16,
-half the disk space of Python's float32). Slow-mode traces are the exception: the Rust port decimates
-before filtering them, so it keeps its own.
+Up to four videos play together, each locked to its own TTL line (line 1, or `--trigger-line`,
+unless changed). **Videos** in the toolbar lists them, with each one's TTL line, Remove and Add
+video…. The first video sets the frame number, frame stepping (← / →), annotation frames and clip
+export.
+
+### Layout
+
+By default the videos sit side by side above the chart. **Float video** turns each video into a box
+over the chart, **Float chart** turns the chart into a box over the video, and with both on each is
+a box of its own; the chart is always drawn on top. While the padlock is open, drag a box to move it
+and its bottom-right corner to resize it; lock it and drags pan time again (the wheel zooms either
+way). **dim** darkens the video where the chart covers it, and **outline** draws a dark edge under
+every trace so it stands out over the video.
+
+### Sharing a cache with Python syncview
+
+Cache entries use the same keys and layout, so `--cache` pointed at a Python syncview cache folder
+reuses its filtered traces and video indexes (and vice versa, untested in that direction since
+v0.1.6: syncview-rs stores traces as float16, half the disk space of Python's float32). Slow-mode
+traces are the exception: syncview-rs decimates before filtering them, so it keeps its own.
+
+## Annotating events
+
+Events are moments (points) or stretches (intervals) with a label, marked on the first video's
+frames and saved next to the recording.
+
+### Labels
+
+The strip under the toolbar lists the labels with their keys. The defaults are B bite, C chewing
+bout, O oro-manual phase, G grooming bout, D drinking, S sniffing and X gastric episode; a preset's
+`labels` replace them:
+
+```json
+"labels": [
+  {"name": "contraction", "key": "U", "kind": "interval", "color": "#e8876a"},
+  {"name": "pup delivered", "key": "P", "kind": "point"}
+]
+```
+
+### Marking
+
+- **Step to the frame** with ← / → and press a label's key: a point is marked at once; an interval
+  starts (its chip lights up) and the next press ends it. One interval per label can be open, so
+  bites can be marked inside an open chewing bout.
+- **One hand on the video, the other marking:** Shift + a label's key (or a click on its chip)
+  primes it; the **stamp** key, the one left of `1` (`` ` `` on US keyboards, found by position),
+  then starts and ends it. While playing, a stamp lands on the frame on screen.
+- **Esc** cancels the last open interval; with none open, it unprimes. **Ctrl/Cmd+Z** undoes,
+  **Ctrl/Cmd+Shift+Z** redoes.
+- Events show as bands (points as ticks) on the chart and as bars on the overview strip.
+
+### Reviewing
+
+- The **Events** tab lists them; click a row, or use ↑ / ↓, to select one and go there.
+  Ctrl/Cmd + ← / → jumps to the previous / next event in time from the cursor. A filter shows one
+  label only.
+- The selected event can get a note, have its start or end moved to the current frame
+  (**Start = here**, **End = here**), or be removed (Delete). Every change can be undone.
+- Fill in **annotator** in the Events tab; each event records who marked it.
+
+### Audit mode
+
+Tick **audit: video only** in the strip to score from the video alone: the traces and earlier marks
+are hidden, and events marked then are saved with `view` = `video`. Once a label has been scored
+both ways, the Events tab shows how the passes agree: events in each, matched pairs (overlapping, or
+starting within 100 ms) and the mean onset and offset differences over the audited stretch.
+
+### Files
+
+- **`syncview_annotations.csv`** in the recording folder, saved a second after each change: one row
+  per event, with times in seconds and sample indexes from the recording's first sample (as
+  Kilosort counts), so they line up with sorted spikes. Comment lines at the top record the version,
+  sample rate, Open Ephys first sample number and labels (`pandas.read_csv(path, comment="#")`).
+- **`syncview_overlaps.csv`** beside it, rewritten on every save: every pair of overlapping events,
+  same-label pairs first (usually double marks).
+- Saves are atomic, a file that can't be read is never overwritten, and columns from a newer version
+  are kept.
 
 ## Export a clip
 
 **Export clip…** (in the toolbar, once a video is synced) saves an MP4 like Python syncview's
-clips: the video on top with a `t = … s   frame N` clock, and the rows shown underneath, with
+clips: the first video on top with a `t = … s   frame N` clock, and the rows shown underneath, with
 their colours and Y ranges, scrolling past a fixed cursor at each frame's trigger.
 
 | field | |
@@ -225,8 +308,8 @@ syncview /path/to/folder --export-clip chewing.mp4 --clip-from 1:45 --clip-to 1:
 
 This uses the preset's shown rows (Y ranges from the preset, or automatic). Clips are H.264 where
 syncview's FFmpeg can encode it (macOS: Apple's VideoToolbox; builds against a system FFmpeg with
-x264), otherwise FFmpeg's own MPEG-4 (Part 2) encoder at high quality (the prebuilt Windows binary). VLC
-plays both; most other players and PowerPoint support MPEG-4 Part 2 too, but H.264 is the safer
+x264), otherwise FFmpeg's own MPEG-4 (Part 2) encoder at high quality (the prebuilt Windows binary).
+VLC plays both; most other players and PowerPoint support MPEG-4 Part 2 too, but H.264 is the safer
 choice for slides.
 
 ## How it draws
@@ -254,12 +337,25 @@ antialiased sides, one logical pixel wide, so lines stay continuous on 1x screen
 - **GUI:** Linux (Hyprland/Wayland, Vulkan, NVIDIA T400), 1648×983, 16 rows + video playing at 1×:
   58–60 frames/s (the display's refresh rate). macOS (Apple silicon, Metal, Retina; Homebrew Rust,
   FFmpeg and pkgconf): builds and runs with the 10-minute excerpt; trackpad and keys behave well.
-- **Not yet checked:** Windows, multi-hour recordings, detailed trackpad/keyboard feel.
+- **Annotation:** marking, priming and stamping, review, undo and audit mode were driven with real
+  key presses and clicks (xdotool on a private X display); the file round trip, overlaps and pass
+  agreement have unit tests.
+- **Not yet checked:** Windows by hand (CI builds it, runs the demo and takes screenshots),
+  multi-hour recordings with video.
 
-## Provenance
+## About
+
+A Rust port of the Python [syncview](https://github.com/matthewperkins/syncview): everything in it
+is ported (the viewer, the channel editor and clip export), and it reads the same recordings and
+presets, plus NWB recordings. Built with [egui](https://github.com/emilk/egui)/eframe for the
+interface, [wgpu](https://wgpu.rs) (Vulkan, Metal, DirectX) for drawing the traces, and FFmpeg
+(`ffmpeg-next`) for video. This repository was called syncviewR before v0.2, and the command
+`syncviewr`.
+
+### Provenance
 
 Written by **Claude** (Anthropic), model **Claude Opus 5.5** (`claude-opus-5-5`, training cutoff
-June 2026), in Claude Code on 2026-10-07/08, directed by **Matthew Perkins**, who holds the
+June 2026), in Claude Code from 2026-10-07, directed by **Matthew Perkins**, who holds the
 copyright. It is a port of the Python syncview written the same way; the invariants listed in that
 README's Provenance section (sync rule, frame indexing by packet-timestamp rank, cache keys) apply
 here too and are what the tests above check.
