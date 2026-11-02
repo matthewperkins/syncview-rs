@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "syncview"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "ab_glyph",
  "anyhow",
