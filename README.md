@@ -174,7 +174,11 @@ the layout too; the Python version ignores them.
 X gastric episode; a preset's `labels` replace them). Step to the frame with ←/→ and press a
 label's key: the first press starts an interval and lights its chip, the second ends it (one open
 interval per label, so bites can be marked inside an open chewing bout); Esc cancels the last open
-one, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes. Marks land on the first video's frames. Events
+one, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes. To keep one hand on the video, **prime** a label
+with Shift + its key (or click its chip), then press the **stamp** key, the one left of `1` (`` ` ``
+on US keyboards, found by position), to open and close it with the other hand; while playing, a
+stamp lands on the frame on screen. With nothing open, Esc unprimes. Marks land on the first
+video's frames. Events
 show as bands on the chart and bars on the overview strip, and are listed in the **Events** tab
 (click one to select it and go there), with the annotator's name. Ctrl/Cmd+← / → steps to the
 previous / next event (only one label's, if the tab's filter says so); the selected event can be
