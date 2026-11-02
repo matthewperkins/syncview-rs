@@ -115,14 +115,14 @@ jobs:
           Shot "start-page" "--screenshot `"$out\start-page.ppm`" --screenshot-after 6"
           Shot "viewer-demo" "--demo `"$env:RUNNER_TEMP\demo`" --cache `"$env:RUNNER_TEMP\cache`" --screenshot `"$out\viewer-demo.ppm`" --screenshot-after 12"
           Get-ChildItem $out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && runner.os == 'Windows'
         with:
           name: windows-screenshots
           path: windows-screenshots
           if-no-files-found: warn
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: clip-test-${{ runner.os }}
           path: clip-test
@@ -157,7 +157,7 @@ jobs:
           else
             (cd target/release && 7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" syncview.exe)
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -167,7 +167,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Attach to the release
