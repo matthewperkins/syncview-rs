@@ -137,6 +137,20 @@ impl Annotations {
         id
     }
 
+    /// Put back an event that was removed (undo / redo), keeping its id.
+    pub fn restore(&mut self, e: Event) {
+        if let Some(n) = e.id.strip_prefix('e').and_then(|n| n.parse::<u64>().ok()) {
+            self.next_id = self.next_id.max(n + 1);
+        }
+        self.events.push(e);
+        self.sort();
+        self.touch();
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Event> {
+        self.events.iter().find(|e| e.id == id)
+    }
+
     /// Remove the event with this id; returns it.
     pub fn remove(&mut self, id: &str) -> Option<Event> {
         let i = self.events.iter().position(|e| e.id == id)?;

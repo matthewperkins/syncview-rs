@@ -113,6 +113,21 @@ pub enum LabelKind {
     Interval,
 }
 
+/// Labels for a preset that names none: the jaw / gut rig's (a project's preset can replace them).
+pub fn default_labels() -> Vec<Label> {
+    let l = |name: &str, key: &str, kind: LabelKind, color: &str| Label { name: name.into(), key: key.into(), kind, color: Some(color.into()) };
+    use LabelKind::Interval;
+    vec![
+        l("bite", "B", Interval, "#e8b84a"),
+        l("chewing bout", "C", Interval, "#5cc8a8"),
+        l("oro-manual phase", "O", Interval, "#e8876a"),
+        l("grooming bout", "G", Interval, "#a98be8"),
+        l("drinking", "D", Interval, "#5aa8e8"),
+        l("sniffing", "S", Interval, "#c8c85a"),
+        l("gastric episode", "X", Interval, "#d878b0"),
+    ]
+}
+
 impl Label {
     /// For the annotations file header: "bite (interval, key B)".
     pub fn describe(&self) -> String {

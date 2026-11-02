@@ -169,6 +169,19 @@ zooms either way). **dim** darkens the video where the chart covers it, and **ou
 dark edge under every trace so it stands out over the video. Presets save the clip settings and
 the layout too; the Python version ignores them.
 
+**Annotating events.** The strip under the toolbar lists the annotation labels, each with its key
+(default: B bite, C chewing bout, O oro-manual phase, G grooming bout, D drinking, S sniffing,
+X gastric episode; a preset's `labels` replace them). Step to the frame with ←/→ and press a
+label's key: the first press starts an interval and lights its chip, the second ends it (one open
+interval per label, so bites can be marked inside an open chewing bout); Esc cancels the last open
+one, Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes. Marks land on the first video's frames. Events
+show as bands on the chart and bars on the overview strip, and are listed in the **Events** tab
+(click one to go there), with the annotator's name. They are saved a second after each change in
+`syncview_annotations.csv` in the recording folder: one row per event, with times in seconds and
+sample indexes from the recording's first sample (as Kilosort counts), so they line up with sorted
+spikes. Each save also rewrites `syncview_overlaps.csv`, listing every pair of overlapping events
+(same-label pairs first, to spot double marks).
+
 **Rows of one muscle share a colour.** Rows named alike apart from a trailing number
 (masseter1 … masseter4, antrum 1 … antrum 4) get the same colour; a preset's own `color` wins.
 

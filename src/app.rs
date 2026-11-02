@@ -191,6 +191,15 @@ pub struct App {
     /// Annotation labels (from the preset) and this recording's annotated events.
     labels: Vec<preset::Label>,
     ann: Annotations,
+    /// Intervals started but not yet ended (label, where it started): one per label at most, so
+    /// bites can be marked inside an open chewing bout.
+    open_marks: Vec<(String, Mark)>,
+    /// Undo / redo of event additions and removals.
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
+    /// The event just added or restored, and when (drawn brighter for a moment).
+    flash: Option<(String, Instant)>,
+    annotator: String,
     /// The last save error shown, so a failing disk doesn't raise the same dialog every second.
     save_error: Option<String>,
 }
@@ -199,6 +208,21 @@ pub struct App {
 enum SideTab {
     Channels,
     Events,
+}
+
+/// Where a mark lands: time (s), sample index, and the reference video's frame.
+#[derive(Clone, Copy)]
+struct Mark {
+    t: f64,
+    sample: i64,
+    frame: Option<i64>,
+}
+
+/// An undoable change to the annotations.
+enum Edit {
+    Added(annotations::Event),
+    #[allow(dead_code)] // deleting from the events list arrives with review (step 3)
+    Removed(annotations::Event),
 }
 
 /// At most this many videos at once (e.g. three side views and one from above).
@@ -475,14 +499,19 @@ impl App {
             file_dialog: None,
             side_tab: SideTab::Channels,
             side_open: true,
-            labels: vec![],
+            labels: preset::default_labels(),
+            open_marks: vec![],
+            undo: vec![],
+            redo: vec![],
+            flash: None,
+            annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.rec_dir),
                 annotations::Header {
                     recording: rec.rec_dir.display().to_string(),
                     sample_rate: rec.fs,
                     first_sample_number: rec.first_sample_number(),
-                    labels: vec![],
+                    labels: preset::default_labels().iter().map(preset::Label::describe).collect(),
                 },
             ),
             save_error: None,
@@ -930,10 +959,56 @@ impl App {
             return;
         }
         use egui::Key;
+        // annotation: label keys, Esc (drop the last open interval), undo / redo
+        let (labels, esc, undo, redo) = ctx.input_mut(|i| {
+            let mut hit = vec![];
+            for (n, l) in self.labels.iter().enumerate() {
+                if let Some(k) = Key::from_name(&l.key.to_uppercase())
+                    && i.consume_key(egui::Modifiers::NONE, k)
+                {
+                    hit.push(n);
+                }
+            }
+            let (mut undo, mut redo) = (false, false);
+            for e in &i.events {
+                if let egui::Event::Key { key, pressed: true, modifiers, .. } = e
+                    && modifiers.command
+                {
+                    match key {
+                        Key::Z if modifiers.shift => redo = true,
+                        Key::Z => undo = true,
+                        Key::Y => redo = true,
+                        _ => {}
+                    }
+                }
+            }
+            (hit, i.consume_key(egui::Modifiers::NONE, Key::Escape), undo, redo)
+        });
+        for n in labels {
+            self.label_key(n);
+        }
+        if esc && let Some((label, m)) = self.open_marks.pop() {
+            self.status = format!("{label} from {} cancelled", fmt_time(m.t, None));
+        }
+        if undo {
+            self.undo_edit();
+        }
+        if redo {
+            self.redo_edit();
+        }
+        // every press in order (several can arrive in one frame: fast typing, key repeat)
         let (pressed, shift) = ctx.input(|i| {
             let keys = [Key::ArrowLeft, Key::ArrowRight, Key::PageUp, Key::PageDown, Key::Home, Key::End, Key::Space,
                         Key::OpenBracket, Key::CloseBracket, Key::Plus, Key::Equals, Key::Minus];
-            (keys.into_iter().filter(|k| i.key_pressed(*k)).collect::<Vec<_>>(), i.modifiers.shift)
+            let pressed = i
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if keys.contains(key) && !modifiers.command => Some(*key),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (pressed, i.modifiers.shift)
         });
         for k in pressed {
             match k {
@@ -1249,15 +1324,20 @@ impl App {
         ui.label(egui::RichText::new(if n == 0 { "No events yet.".to_string() } else { format!("{n} event{}", if n == 1 { "" } else { "s" }) }).color(LABEL))
             .on_hover_text(self.ann.path.display().to_string());
         ui.label(egui::RichText::new(format!("saved in {name}, next to the recording")).small().color(MUTED));
+        ui.horizontal(|ui| {
+            ui.label("annotator");
+            ui.add(egui::TextEdit::singleline(&mut self.annotator).desired_width(90.0)).on_hover_text("written with each event you mark");
+        });
         ui.separator();
         let mut jump = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for e in &self.ann.events {
                 let len = if e.is_point() { String::new() } else { format!("  {:.2} s", e.end_s - e.start_s) };
-                let color = self.labels.iter().find(|l| l.name == e.label).and_then(|l| l.color.as_deref()).map(hex).unwrap_or(FG);
+                let color = self.label_color(&e.label);
                 let r = ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("■").color(color));
-                    ui.label(egui::RichText::new(&e.label).color(LABEL));
+                    let bright = self.flash.as_ref().is_some_and(|(id, at)| *id == e.id && at.elapsed().as_secs_f32() < 0.8);
+                    ui.label(egui::RichText::new(&e.label).color(if bright { color } else { LABEL }));
                     ui.label(egui::RichText::new(format!("{}{len}", fmt_time(e.start_s, None))).monospace().small().color(MUTED));
                 });
                 let r = r.response.interact(Sense::click()).on_hover_text(if e.note.is_empty() { "click to go there".to_string() } else { e.note.clone() });
@@ -1269,6 +1349,139 @@ impl App {
         if let Some(t) = jump {
             self.set_time(t);
         }
+    }
+
+    /// A label's colour (its own, else one from a palette by its place in the list).
+    fn label_color(&self, name: &str) -> Color32 {
+        const PALETTE: [&str; 6] = ["#e8b84a", "#5cc8a8", "#e8876a", "#a98be8", "#5aa8e8", "#c8c85a"];
+        match self.labels.iter().position(|l| l.name == name) {
+            Some(i) => self.labels[i].color.as_deref().map(hex).unwrap_or_else(|| hex(PALETTE[i % PALETTE.len()])),
+            None => MUTED,
+        }
+    }
+
+    /// Where a mark made now lands: the reference video's current frame (its trigger time and
+    /// sample), or the cursor when there is no video.
+    fn mark_here(&self) -> Mark {
+        match self.cam0().and_then(|c| c.frame_at(self.t).map(|k| (c, k))) {
+            Some((c, k)) => Mark { t: c.frames[k], sample: c.rows[k], frame: Some(k as i64) },
+            None => Mark { t: self.t, sample: (self.t * self.rec.fs).round() as i64, frame: None },
+        }
+    }
+
+    /// A label's key: mark a point now, or start / finish an interval.
+    fn label_key(&mut self, n: usize) {
+        if let Some(e) = &self.ann.load_error {
+            self.status = format!("annotations are read-only: {e}");
+            return;
+        }
+        let l = self.labels[n].clone();
+        let here = self.mark_here();
+        let (a, b) = match l.kind {
+            preset::LabelKind::Point => (here, here),
+            preset::LabelKind::Interval => match self.open_marks.iter().position(|(name, _)| *name == l.name) {
+                None => {
+                    self.status = format!("{} from {}: press {} again at its end (Esc cancels)", l.name, fmt_time(here.t, None), l.key);
+                    self.open_marks.push((l.name, here));
+                    return;
+                }
+                Some(i) => {
+                    let start = self.open_marks.remove(i).1;
+                    if start.t <= here.t { (start, here) } else { (here, start) }
+                }
+            },
+        };
+        let e = annotations::Event {
+            id: String::new(),
+            label: l.name.clone(),
+            start_s: a.t,
+            end_s: b.t,
+            start_sample: a.sample,
+            end_sample: b.sample,
+            frame_start: a.frame,
+            frame_end: b.frame,
+            video: self.cam0().map(|c| c.name()).unwrap_or_default(),
+            note: String::new(),
+            annotator: self.annotator.trim().to_string(),
+            view: "video+emg".into(),
+            marked_at: annotations::now_utc(),
+            kind: if l.kind == preset::LabelKind::Point { "point".into() } else { "interval".into() },
+            extra: Default::default(),
+        };
+        let id = self.ann.add(e);
+        let e = self.ann.get(&id).cloned().unwrap();
+        self.status = if e.is_point() {
+            format!("{} at {}", e.label, fmt_time(e.start_s, None))
+        } else {
+            format!("{} {} – {} ({:.2} s)", e.label, fmt_time(e.start_s, None), fmt_time(e.end_s, None), e.end_s - e.start_s)
+        };
+        self.flash = Some((id, Instant::now()));
+        self.undo.push(Edit::Added(e));
+        self.redo.clear();
+    }
+
+    fn undo_edit(&mut self) {
+        let Some(op) = self.undo.pop() else { return };
+        match &op {
+            Edit::Added(e) => {
+                self.ann.remove(&e.id);
+                self.status = format!("undid: {} at {}", e.label, fmt_time(e.start_s, None));
+            }
+            Edit::Removed(e) => {
+                self.ann.restore(e.clone());
+                self.flash = Some((e.id.clone(), Instant::now()));
+                self.status = format!("undid removing {} at {}", e.label, fmt_time(e.start_s, None));
+            }
+        }
+        self.redo.push(op);
+    }
+
+    fn redo_edit(&mut self) {
+        let Some(op) = self.redo.pop() else { return };
+        match &op {
+            Edit::Added(e) => {
+                self.ann.restore(e.clone());
+                self.flash = Some((e.id.clone(), Instant::now()));
+                self.status = format!("redid: {} at {}", e.label, fmt_time(e.start_s, None));
+            }
+            Edit::Removed(e) => {
+                self.ann.remove(&e.id);
+                self.status = format!("redid removing {} at {}", e.label, fmt_time(e.start_s, None));
+            }
+        }
+        self.undo.push(op);
+    }
+
+    /// Under the toolbar: every label with its key and colour; an open interval's chip is lit and
+    /// says where it started.
+    fn label_strip(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for l in &self.labels {
+                let c = self.label_color(&l.name);
+                let open = self.open_marks.iter().find(|(n, _)| *n == l.name).map(|(_, m)| m.t);
+                let text = match open {
+                    Some(t) => format!("[{}] {}  since {}", l.key, l.name, fmt_time(t, None)),
+                    None if l.key.is_empty() => l.name.clone(),
+                    None => format!("[{}] {}", l.key, l.name),
+                };
+                let chip = egui::Frame::new()
+                    .fill(if open.is_some() { c.gamma_multiply(0.35) } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::new(1.0, c.gamma_multiply(if open.is_some() { 1.0 } else { 0.5 })))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 1));
+                let kind = if l.kind == preset::LabelKind::Point { "a point" } else { "an interval: press once at its start and again at its end" };
+                chip.show(ui, |ui| ui.label(egui::RichText::new(text).color(if open.is_some() { LABEL } else { c }).size(12.5)))
+                    .response
+                    .on_hover_text(format!("{}: {kind}", l.name));
+            }
+            if self.ann.load_error.is_some() {
+                ui.label(egui::RichText::new("annotations read-only (see Events)").color(Color32::from_rgb(0xe0, 0x70, 0x60)));
+            } else {
+                let undo = if cfg!(target_os = "macos") { "Cmd+Z undo, Cmd+Shift+Z redo" } else { "Ctrl+Z undo, Ctrl+Shift+Z redo" };
+                ui.label(egui::RichText::new(format!("Esc cancels an open interval · {undo}")).small().color(MUTED));
+            }
+        });
     }
 
     /// Save the annotations a second after the last change (and say so once if it fails).
@@ -1529,6 +1742,38 @@ impl App {
                 }
             }
         }
+        // annotated events: bands for intervals, ticks for points; open intervals run to the cursor
+        let ev_painter = ui.painter_at(Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom)));
+        let tx_abs = |v: f64| x0 + ((v - t_lo) / span) as f32 * plot_w;
+        for e in &self.ann.events {
+            if e.end_s < t_lo || e.start_s > t_hi {
+                continue;
+            }
+            let c = self.label_color(&e.label);
+            let bright = self.flash.as_ref().is_some_and(|(id, at)| *id == e.id && at.elapsed().as_secs_f32() < 0.8);
+            if e.is_point() {
+                let x = tx_abs(e.start_s);
+                ev_painter.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], Stroke::new(if bright { 3.0 } else { 1.5 }, c));
+            } else {
+                let (a, b) = (tx_abs(e.start_s), tx_abs(e.end_s).max(tx_abs(e.start_s) + 2.0));
+                let band = Rect::from_min_max(Pos2::new(a, top), Pos2::new(b, bottom));
+                ev_painter.rect_filled(band, 0.0, c.gamma_multiply(if bright { 0.45 } else { 0.16 }));
+                ev_painter.rect_filled(Rect::from_min_max(band.min, Pos2::new(b, top + 3.0)), 0.0, c);
+                if b - a > 40.0 {
+                    ev_painter.text(Pos2::new(a + 3.0, top + 4.0), Align2::LEFT_TOP, &e.label, FontId::proportional(10.5), c);
+                }
+            }
+        }
+        for (label, m) in &self.open_marks {
+            let c = self.label_color(label);
+            let (a, b) = (tx_abs(m.t.min(t)), tx_abs(m.t.max(t)));
+            let band = Rect::from_min_max(Pos2::new(a, top), Pos2::new(b.max(a + 2.0), bottom));
+            ev_painter.rect_filled(band, 0.0, c.gamma_multiply(0.25));
+            ev_painter.rect_stroke(band, 0.0, Stroke::new(1.5, c), egui::StrokeKind::Inside);
+        }
+        if self.flash.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < 0.8) {
+            ui.ctx().request_repaint();
+        }
         // cursor line and time axis (time relative to the cursor; signed tick labels)
         let cx = x0 + plot_w / 2.0;
         let fg_painter = ui.painter_at(rect);
@@ -1637,6 +1882,11 @@ impl App {
         p.rect_filled(Rect::from_min_max(Pos2::new(a, top), Pos2::new(b.max(a + 1.0), bottom)), 0.0, Color32::from_white_alpha(40));
         p.line_segment([Pos2::new(tx(self.t), top), Pos2::new(tx(self.t), bottom)], Stroke::new(1.0, Color32::WHITE));
         // time axis
+        // annotated events along the bottom of the strip
+        for e in &self.ann.events {
+            let (a, b) = (tx(e.start_s), tx(e.end_s).max(tx(e.start_s) + 1.5));
+            p.rect_filled(Rect::from_min_max(Pos2::new(a, bottom - 7.0), Pos2::new(b, bottom - 1.0)), 0.0, self.label_color(&e.label));
+        }
         let (major, _) = nice_spacing(dur, ((x1 - x0) as f64 / 110.0).floor().max(3.0));
         let mut k = 1;
         while k as f64 * major < dur {
@@ -1926,6 +2176,9 @@ impl App {
             self.toolbar(ui);
             ui.add_space(3.0);
         });
+        if !self.labels.is_empty() {
+            egui::Panel::top("labels").show(ui, |ui| self.label_strip(ui));
+        }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         let overview = egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui)).response.rect;
         let max_w = (ui.available_width() * 0.45).max(120.0);
