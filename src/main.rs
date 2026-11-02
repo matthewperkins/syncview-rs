@@ -118,6 +118,9 @@ struct Cli {
     /// (testing) time software and hardware decoding of this video, then exit
     #[arg(long, hide = true, value_name = "VIDEO")]
     bench_video: Option<PathBuf>,
+    /// (testing) build this video's frame index both ways (container tables, full scan) and compare
+    #[arg(long, hide = true, value_name = "VIDEO")]
+    check_index: Option<PathBuf>,
     /// (testing) time reading the preset's channels from the recording, then exit
     #[arg(long, hide = true)]
     bench_read: bool,
@@ -159,6 +162,9 @@ fn main() -> Result<()> {
     if let (Some(d), Some(v)) = (&cli.dump_frames, cli.video.first()) {
         let idx: Vec<usize> = d[0].split(',').map(|s| s.parse()).collect::<Result<_, _>>()?;
         return video::dump_frames(v, &idx, std::path::Path::new(&d[1]));
+    }
+    if let Some(v) = &cli.check_index {
+        return video::check_index(v);
     }
     if let Some(v) = &cli.bench_video {
         return video::bench(v);

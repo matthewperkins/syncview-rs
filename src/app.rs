@@ -765,6 +765,15 @@ impl App {
             }
             let t = self.t;
             let c = &mut self.cams[i];
+            if c.opened.is_none()
+                && let Some(f) = c.dec.indexing()
+            {
+                c.msg = if f < 0.0 {
+                    format!("reading the frame tables of {} (first open only) …", c.name())
+                } else {
+                    format!("indexing the frames of {}: {:.0} % (first open only)", c.name(), f * 100.0)
+                };
+            }
             if let Some(f) = c.dec.take_frame() {
                 let img = egui::ColorImage::from_rgb([f.width, f.height], &f.rgb);
                 match &mut c.tex {
@@ -1284,6 +1293,49 @@ impl App {
         if add {
             let ctx = ui.ctx().clone();
             self.choose_video_dialog(&ctx);
+        }
+    }
+
+    /// Work done only the first time a recording or video is opened is under way.
+    fn first_open_busy(&self) -> bool {
+        self.builder.progress.lock().unwrap().is_some() || self.cams.iter().any(|c| c.opened.is_none() && c.dec.indexing().is_some())
+    }
+
+    /// The first-open banner: what is being read, how far along, and that it happens once.
+    fn first_open_ui(&mut self, ui: &mut egui::Ui) {
+        let gb = |bytes: f64| if bytes >= 1e9 { format!("{:.1} GB", bytes / 1e9) } else { format!("{:.0} MB", bytes / 1e6) };
+        ui.label(
+            egui::RichText::new("Preparing this recording: syncview reads each file once and remembers the result, so the next time it opens straight away.")
+                .color(LABEL),
+        );
+        ui.label(
+            egui::RichText::new("You can look around meanwhile: the traces on screen are filtered on the fly, and rows fill in as they finish.")
+                .small()
+                .color(MUTED),
+        );
+        let w = (ui.available_width() * 0.35).clamp(160.0, 360.0);
+        if let Some(f) = *self.builder.progress.lock().unwrap() {
+            let bytes = self.rec.n_samples() as f64 * self.rec.ch_names.len() as f64 * 2.0;
+            ui.horizontal(|ui| {
+                ui.add(egui::ProgressBar::new(f as f32).desired_width(w).text(format!("{:.0} %", f * 100.0)));
+                ui.label(egui::RichText::new(format!("filtering the whole recording ({} of data)", gb(bytes))).color(FG));
+            });
+        }
+        for c in &self.cams {
+            if c.opened.is_none()
+                && let Some(f) = c.dec.indexing()
+            {
+                let bytes = std::fs::metadata(&c.dec.path).map(|m| m.len() as f64).unwrap_or(0.0);
+                ui.horizontal(|ui| {
+                    if f < 0.0 {
+                        // opening: the container's frame tables, no fraction to show
+                        ui.add(egui::ProgressBar::new(0.0).desired_width(w).animate(true).text("reading frame tables"));
+                    } else {
+                        ui.add(egui::ProgressBar::new(f).desired_width(w).text(format!("{:.0} %", f * 100.0)));
+                    }
+                    ui.label(egui::RichText::new(format!("indexing the frames of {} ({})", c.name(), gb(bytes))).color(FG));
+                });
+            }
         }
     }
 
@@ -2516,6 +2568,9 @@ impl App {
         });
         if !self.labels.is_empty() {
             egui::Panel::top("labels").show(ui, |ui| self.label_strip(ui));
+        }
+        if self.first_open_busy() {
+            egui::Panel::top("first_open").frame(egui::Frame::NONE.fill(Color32::from_rgb(0x1c, 0x1f, 0x2c)).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| self.first_open_ui(ui));
         }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         let overview = egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui)).response.rect;

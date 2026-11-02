@@ -27,6 +27,12 @@ pub struct Frame {
 
 /// Sorted presentation timestamps of the video stream's packets: entry k is frame k.
 pub fn frame_pts(path: &Path, index_dir: &Path) -> Result<Vec<i64>> {
+    frame_pts_progress(path, index_dir, &|_| {})
+}
+
+/// `frame_pts`, reporting how much of the file has been read (0 to 1) while it builds the index
+/// (the first time a video is opened: it reads the whole file once).
+pub fn frame_pts_progress(path: &Path, index_dir: &Path, progress: &dyn Fn(f32)) -> Result<Vec<i64>> {
     let path = std::fs::canonicalize(path)?;
     let md = std::fs::metadata(&path)?;
     let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos();
@@ -37,13 +43,15 @@ pub fn frame_pts(path: &Path, index_dir: &Path) -> Result<Vec<i64>> {
     if let Ok(v) = npy::read_i64(&file) {
         return Ok(v);
     }
+    // opening reads the container's frame tables (for a fragmented MP4, thousands of small ones,
+    // spread through the file): no fraction to report yet
+    progress(-1.0);
     let mut ictx = ff::format::input(&path)?;
     let si = ictx.streams().best(ff::media::Type::Video).context("no video stream")?.index();
-    let mut pts: Vec<i64> = ictx
-        .packets()
-        .filter(|(s, p)| s.index() == si && p.size() > 0)
-        .filter_map(|(_, p)| p.pts())
-        .collect();
+    let mut pts = match pts_from_demuxer_index(&mut ictx, si) {
+        Some(p) => p,
+        None => scan_packets(&mut ictx, si, md.len(), progress),
+    };
     pts.sort_unstable();
     let save = || -> Result<()> {
         std::fs::create_dir_all(index_dir)?;
@@ -56,6 +64,107 @@ pub fn frame_pts(path: &Path, index_dir: &Path) -> Result<Vec<i64>> {
         eprintln!("syncview: could not save the video index to {}: {e:#}", file.display());
     }
     Ok(pts)
+}
+
+/// Every video packet's timestamp, read by demuxing the whole file (any container; slow for big
+/// files: the whole file is read).
+fn scan_packets(ictx: &mut ff::format::context::Input, si: usize, len: u64, progress: &dyn Fn(f32)) -> Vec<i64> {
+    let len = len.max(1) as f64;
+    let mut pts: Vec<i64> = vec![];
+    progress(0.0);
+    for (n, (s, p)) in ictx.packets().enumerate() {
+        if s.index() == si
+            && p.size() > 0
+            && let Some(t) = p.pts()
+        {
+            pts.push(t);
+        }
+        if n % 2000 == 0 && p.position() >= 0 {
+            progress((p.position() as f64 / len) as f32);
+        }
+    }
+    pts
+}
+
+/// The frame timestamps an MP4 / MOV demuxer already holds after opening (its sample tables, or
+/// every fragment's), when they are exactly what reading every packet would give: no reordered
+/// frames, and the file's first packets and its last ones match. None: scan the packets instead.
+fn pts_from_demuxer_index(ictx: &mut ff::format::context::Input, si: usize) -> Option<Vec<i64>> {
+    if !ictx.format().name().split(',').any(|n| n == "mov" || n == "mp4") {
+        return None;
+    }
+    let st = unsafe { (*ictx.as_ptr()).streams.add(si).read() };
+    // reordered frames (B-frames): the index holds decode times, the packets presentation times
+    if unsafe { (*(*st).codecpar).video_delay } > 0 {
+        return None;
+    }
+    let n = unsafe { ff::ffi::avformat_index_get_entries_count(st) };
+    if n < 2 {
+        return None;
+    }
+    let mut pts = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let e = unsafe { ff::ffi::avformat_index_get_entry(st, i) };
+        if e.is_null() {
+            return None;
+        }
+        let e = unsafe { &*e };
+        if e.flags() as i32 & ff::ffi::AVINDEX_DISCARD_FRAME != 0 || e.size() == 0 {
+            continue;
+        }
+        pts.push(e.timestamp);
+    }
+    // the first packets, as the scan would read them
+    let head: Vec<(i64, Option<i64>)> =
+        ictx.packets().filter(|(s, p)| s.index() == si && p.size() > 0).take(300).filter_map(|(_, p)| Some((p.pts()?, p.dts()))).collect();
+    if head.is_empty() || head.iter().any(|(p, d)| Some(*p) != *d) || head.iter().zip(&pts).any(|((p, _), q)| p != q) {
+        return None;
+    }
+    // and the last ones: seek back from the end and read to it
+    let last = *pts.iter().max()?;
+    let back = pts[pts.len().saturating_sub(300)];
+    if unsafe { ff::ffi::av_seek_frame(ictx.as_mut_ptr(), si as i32, back, ff::ffi::AVSEEK_FLAG_BACKWARD) } < 0 {
+        return None;
+    }
+    let known: std::collections::HashSet<i64> = pts.iter().copied().collect();
+    let tail: Vec<i64> = ictx.packets().filter(|(s, p)| s.index() == si && p.size() > 0).filter_map(|(_, p)| p.pts()).collect();
+    if tail.is_empty() || tail.iter().any(|t| !known.contains(t)) || tail.iter().max() != Some(&last) {
+        return None;
+    }
+    Some(pts)
+}
+
+/// (testing) Build a video's frame index both ways, the demuxer's tables and a full packet scan,
+/// and say whether they agree.
+pub fn check_index(path: &Path) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let mut ictx = ff::format::input(&path)?;
+    let si = ictx.streams().best(ff::media::Type::Video).context("no video stream")?.index();
+    let t_open = t0.elapsed().as_secs_f64();
+    let fast = pts_from_demuxer_index(&mut ictx, si).map(|mut p| {
+        p.sort_unstable();
+        p
+    });
+    let t_fast = t0.elapsed().as_secs_f64();
+    let mut ictx = ff::format::input(&path)?;
+    let len = std::fs::metadata(path)?.len();
+    let mut full = scan_packets(&mut ictx, si, len, &|_| {});
+    full.sort_unstable();
+    let t_full = t0.elapsed().as_secs_f64() - t_fast;
+    match fast {
+        None => println!("{}: fast index not usable (falls back to the full scan); full scan {} frames in {t_full:.1} s", path.display(), full.len()),
+        Some(f) => println!(
+            "{}: fast index {} frames ({:.2} s, open {:.2} s), full scan {} frames ({:.1} s): {}",
+            path.display(),
+            f.len(),
+            t_fast,
+            t_open,
+            full.len(),
+            t_full,
+            if f == full { "IDENTICAL" } else { "DIFFERENT" }
+        ),
+    }
+    Ok(())
 }
 
 /// Frames between keyframes if the stream has a fixed GOP, else None (first 2000 packets).
@@ -378,6 +487,8 @@ fn decode_to(dec: &mut Decoder, k: usize, gop: Option<usize>, next: &mut Option<
 struct Shared {
     request: Option<usize>,
     stop: bool,
+    /// Building the frame index: the share of the file read so far.
+    indexing: Option<f32>,
     opened: Option<Result<VideoInfo, String>>,
     latest: Option<Arc<Frame>>,
 }
@@ -407,7 +518,8 @@ impl VideoDecoder {
                     on_change();
                 };
                 let opened = (|| -> Result<(Decoder, Option<usize>)> {
-                    let pts = frame_pts(&p, &index_dir)?;
+                    let pts = frame_pts_progress(&p, &index_dir, &|f| set(&|s| s.indexing = Some(f)))?;
+                    set(&|s| s.indexing = None);
                     Ok((Decoder::open(&p, pts)?, keyframe_interval(&p)))
                 })();
                 let (mut dec, gop) = match opened {
@@ -489,6 +601,11 @@ impl VideoDecoder {
         let (m, cv) = &*self.shared;
         m.lock().unwrap().request = Some(k);
         cv.notify_all();
+    }
+
+    /// While the frame index is being built (first open only): the share of the file read.
+    pub fn indexing(&self) -> Option<f32> {
+        self.shared.0.lock().unwrap().indexing
     }
 
     /// Ok(info) once opened, Err(message) if opening failed, None while opening.

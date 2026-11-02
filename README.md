@@ -156,6 +156,10 @@ syncview /path/to/folder          # finds the recording, videos and preset insid
   says so first: open anyway, open without that video, or go back.
 - **While viewing,** drop a video on the window to add it, or another folder to go back to the start
   page with it.
+- **The first open of a recording or video** does work that is then remembered: filtering the whole
+  recording into the cache, and indexing each video's frames (an MP4 / MOV without reordered
+  frames from its own frame tables; any other video by reading it once). A banner under the
+  toolbar shows each step's progress; the traces on screen are filtered on the fly meanwhile.
 
 ### From the command line
 
