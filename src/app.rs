@@ -244,8 +244,8 @@ fn set_edge(e: &mut annotations::Event, m: Mark, start: bool) {
 enum Edit {
     Added(annotations::Event),
     Removed(annotations::Event),
-    /// Before, after.
-    Changed(annotations::Event, annotations::Event),
+    /// Before, after (boxed: two events are much bigger than the other variants).
+    Changed(Box<(annotations::Event, annotations::Event)>),
 }
 
 /// At most this many videos at once (e.g. three side views and one from above).
@@ -1459,7 +1459,7 @@ impl App {
         }
         after.marked_at = annotations::now_utc();
         self.ann.replace(after.clone());
-        self.undo.push(Edit::Changed(before, after));
+        self.undo.push(Edit::Changed(Box::new((before, after))));
         self.redo.clear();
     }
 
@@ -1584,7 +1584,8 @@ impl App {
                 self.flash = Some((e.id.clone(), Instant::now()));
                 self.status = format!("undid removing {} at {}", e.label, fmt_time(e.start_s, None));
             }
-            Edit::Changed(before, _) => {
+            Edit::Changed(c) => {
+                let before = &c.0;
                 self.ann.replace(before.clone());
                 self.status = format!("undid the change to {} at {}", before.label, fmt_time(before.start_s, None));
             }
@@ -1605,7 +1606,8 @@ impl App {
                 self.ann.remove(&e.id);
                 self.status = format!("redid removing {} at {}", e.label, fmt_time(e.start_s, None));
             }
-            Edit::Changed(_, after) => {
+            Edit::Changed(c) => {
+                let after = &c.1;
                 self.ann.replace(after.clone());
                 self.status = format!("redid the change to {} at {}", after.label, fmt_time(after.start_s, None));
             }
