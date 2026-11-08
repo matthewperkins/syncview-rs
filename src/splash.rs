@@ -149,13 +149,9 @@ const WARN_TEXT: Color32 = Color32::from_rgb(0xf2, 0xb0, 0xa6);
 /// A warning when the video's frame count (estimated from the container) and the recording's
 /// camera triggers differ by more than 2 (one extra trigger at the end is normal).
 fn alignment_warning(rec: &Path, frames: usize, video_path: &Path, stream: Option<&str>, line: i64) -> Option<String> {
-    let r = openephys::Recording::open(rec).ok()?;
-    let c = match stream {
-        Some(s) => r.stream(s).ok()?,
-        None => r.stream("acquisition_board").or_else(|_| r.main_stream()).ok()?,
-    };
+    let r = crate::oe::Recording::open(rec, stream).ok()?;
     let l = u16::try_from(line).ok()?;
-    let triggers = r.ttl_for(c).map(|t| t.lines().get(&l).map_or(0, |e| e.rising)).max().unwrap_or(0);
+    let triggers = r.rising_edges(line).len();
     let diff = triggers as i64 - frames as i64;
     if diff.abs() <= 2 {
         return None;
@@ -207,6 +203,18 @@ fn rel(p: &Path, base: &Path) -> String {
 
 /// One line about a recording: length, channels, start, camera triggers.
 fn describe_recording(path: &Path, line: i64) -> String {
+    if crate::portable::is_session(path) {
+        return match crate::oe::Recording::open(path, None) {
+            Ok(r) => format!(
+                "portable session  ·  {}  ·  {} ch @ {} kHz  ·  {} triggers on line {line}",
+                fmt_time(r.duration(), Some(3600.0)),
+                r.ch_names.len(),
+                r.fs / 1000.0,
+                r.rising_edges(line).len()
+            ),
+            Err(e) => format!("can't open: {e}"),
+        };
+    }
     let rec = match openephys::Recording::open(path) {
         Ok(r) => r,
         Err(e) => return format!("can't open: {e}"),
@@ -317,7 +325,7 @@ impl Splash {
             self.note(format!("Several folders were dropped; using {}.", first.display()));
         }
         let dir = if first.ends_with("structure.oebin") { first.parent().unwrap_or(first).to_path_buf() } else { (*first).clone() };
-        let found = openephys::find_recordings(&dir, 6);
+        let found = folder::find_recordings(&dir);
         if dir.is_dir()
             && let Some(p) = folder::pick_preset(&folder::presets(&dir))
         {
@@ -382,7 +390,9 @@ impl Splash {
         let names: Vec<String> = l.videos.iter().map(|v| v.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
         let progress = std::sync::Arc::new(std::sync::Mutex::new(vec![None; l.videos.len()]));
         let (tx, rx) = channel();
-        let (p, vids, rec, idx, stream, line) = (progress.clone(), l.videos.clone(), l.rec.clone(), self.index_dir(), self.stream.clone(), self.trigger_line);
+        // (a portable session carries its videos' frame indexes)
+        let idx = if crate::portable::is_session(&l.rec) { l.rec.join("traces").join("video_index") } else { self.index_dir() };
+        let (p, vids, rec, stream, line) = (progress.clone(), l.videos.clone(), l.rec.clone(), self.stream.clone(), self.trigger_line);
         std::thread::spawn(move || {
             let mut warnings = vec![];
             for (i, v) in vids.iter().enumerate() {

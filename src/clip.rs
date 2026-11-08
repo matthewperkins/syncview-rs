@@ -240,6 +240,9 @@ fn row_trace(rec: &Recording, cache: &TraceCache, spec: &Spec, t_lo: f64, t_hi: 
     if let Some(t) = cache.get(spec) {
         return Ok(t);
     }
+    if rec.is_portable() {
+        anyhow::bail!("{} isn't in this portable session", spec.title());
+    }
     let fs = rec.fs;
     let i0 = (t_lo.max(0.0) * fs) as i64;
     let i1 = (t_hi.min(rec.duration()) * fs) as i64;

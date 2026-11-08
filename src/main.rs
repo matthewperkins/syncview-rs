@@ -16,6 +16,7 @@ mod folder;
 mod gpu;
 mod npy;
 mod oe;
+mod portable;
 mod preset;
 mod shell;
 mod splash;
@@ -122,6 +123,16 @@ struct Cli {
     /// and, on Linux, the recording's and videos' files dropped from the OS's memory first
     #[arg(long, hide = true)]
     cold: bool,
+    /// write a portable session into the new folder DIR (the recording's shown rows, filtered, its
+    /// camera triggers, the videos' frame indexes, the preset and annotations), building the cache
+    /// first if needed; open DIR elsewhere to view and annotate without the recording
+    #[arg(long, value_name = "DIR")]
+    export_portable: Option<PathBuf>,
+    /// finest zoom level kept for full-rate (EMG) traces in --export-portable: 1 = blocks of 8
+    /// samples (exact down to about 8 samples per pixel column), 2 = 64, 3 = 512; smaller sessions
+    /// for higher numbers
+    #[arg(long, default_value_t = 1, value_name = "LEVEL")]
+    portable_detail: usize,
     /// (testing) build this video's frame index both ways (container tables, full scan) and compare
     #[arg(long, hide = true, value_name = "VIDEO")]
     check_index: Option<PathBuf>,
@@ -279,21 +290,32 @@ fn main() -> Result<()> {
         rec.bench_read(&chans, (600.0 * rec.fs) as usize);
         return Ok(());
     }
-    if cli.build_only {
-        let shell::Start::Viewer(l) = &start else { anyhow::bail!("--build-only needs one recording") };
+    if cli.build_only || cli.export_portable.is_some() {
+        let shell::Start::Viewer(l) = &start else { anyhow::bail!("--build-only and --export-portable need one recording") };
         if cli.cold {
             cache::evict_from_memory(&l.rec);
         }
         let rec = Arc::new(oe::Recording::open(&l.rec, cli.stream.as_deref())?);
-        let cache = Arc::new(cache::TraceCache::new(rec.clone(), root)?);
+        let cache = Arc::new(cache::TraceCache::new(rec.clone(), root.clone())?);
         let (p, _) = preset::check(shell::load_preset(&l.preset, &rec)?, &rec);
-        let mut specs: Vec<preset::Spec> = p.channels.into_iter().filter(|s| s.show).collect();
-        specs.extend(p.overview);
+        let mut specs: Vec<preset::Spec> = p.channels.iter().filter(|s| s.show).cloned().collect();
+        specs.extend(p.overview.clone());
         let t0 = std::time::Instant::now();
         cache.build(&specs, &|f| eprint!("\rbuilding {:.0}%", f * 100.0), &|| false)?;
         eprintln!("\nsyncview: built {} traces in {:.1} s", specs.len(), t0.elapsed().as_secs_f64());
         if let Some(t) = cache.last_build.lock().unwrap().as_ref() {
             eprintln!("{t}");
+        }
+        if let Some(out) = &cli.export_portable {
+            let level = cli.portable_detail.max(1);
+            eprintln!(
+                "syncview: portable session at level {level} ({:.1} GB of traces; full-rate rows exact down to {:.2} s across 1500 pixels)",
+                portable::estimate(&cache, &specs, level) as f64 / 1e9,
+                portable::exact_down_to(rec.fs, level, 1500.0)
+            );
+            let t0 = std::time::Instant::now();
+            portable::export(&rec, &cache, &specs, &p, &l.videos, &root.join("video_index"), level, out, &|f| eprint!("\rwriting {:.0}%", f * 100.0))?;
+            eprintln!("\nsyncview: wrote {} in {:.1} s", out.display(), t0.elapsed().as_secs_f64());
         }
         return Ok(());
     }

@@ -219,6 +219,8 @@ impl std::fmt::Display for BuildTimes {
 
 impl TraceCache {
     pub fn new(rec: Arc<Recording>, root: PathBuf) -> Result<Self> {
+        // a portable session's traces are in the session (and nothing can be added to them)
+        let root = if rec.is_portable() { rec.home.join("traces") } else { root };
         std::fs::create_dir_all(&root).with_context(|| format!("creating cache folder {}", root.display()))?;
         let rec_dir = rec.rec_dir.to_string_lossy().into_owned();
         Ok(TraceCache { rec, root, rec_dir, open: Mutex::new(HashMap::new()), last_build: Mutex::new(None) })
@@ -269,7 +271,8 @@ impl TraceCache {
     pub fn build(&self, specs: &[Spec], progress: &(dyn Fn(f64) + Sync), cancel: &(dyn Fn() -> bool + Sync)) -> Result<bool> {
         let t_build = std::time::Instant::now();
         let specs = self.missing(specs);
-        if specs.is_empty() {
+        if specs.is_empty() || self.rec.is_portable() {
+            // (a portable session can't filter: traces it lacks show as missing)
             return Ok(true);
         }
         let rec = &self.rec;

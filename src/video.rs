@@ -38,6 +38,11 @@ pub fn frame_pts_progress(path: &Path, index_dir: &Path, progress: &dyn Fn(f32))
     if let Ok(v) = npy::read_i64(&file) {
         return Ok(v);
     }
+    // a portable session's copy (named by the video's name and size, wherever it now is)
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if let Ok(v) = npy::read_i64(&index_dir.join(portable_index_name(&name, md.len()))) {
+        return Ok(v);
+    }
     // opening reads the container's frame tables (for a fragmented MP4, thousands of small ones,
     // spread through the file, which is most of the work): report how far into the file it is
     progress(0.0);
@@ -74,11 +79,19 @@ fn index_file(path: &Path, index_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((path, file))
 }
 
+/// A frame index's file name in a portable session: the video's name and size (its path and
+/// modification time change when it is copied).
+pub fn portable_index_name(name: &str, size: u64) -> String {
+    format!("{name}.{size}.npy")
+}
+
 /// Frame count and duration (s) from a video's saved frame index, if it has one (no index is
 /// built: that can take a while for a big file on a slow disk).
 pub fn indexed_stats(path: &Path, index_dir: &Path) -> Option<(usize, f64)> {
     let (path, file) = index_file(path, index_dir).ok()?;
-    let pts = npy::read_i64(&file).ok()?;
+    let size = std::fs::metadata(&path).ok()?.len();
+    let name = path.file_name()?.to_string_lossy();
+    let pts = npy::read_i64(&file).or_else(|_| npy::read_i64(&index_dir.join(portable_index_name(&name, size)))).ok()?;
     Some((pts.len(), pts_duration(&path, &pts)?))
 }
 

@@ -545,7 +545,7 @@ impl App {
             help: false,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
-                annotations::file_for(&rec.rec_dir),
+                annotations::file_for(&rec.home),
                 annotations::Header {
                     recording: rec.rec_dir.display().to_string(),
                     sample_rate: rec.fs,
@@ -2197,9 +2197,15 @@ impl App {
             }
             match tr {
                 None => {
-                    let msg = if span <= WINDOW_MAX_S { "filtering…" } else { "filtering session… (zoom in to preview)" };
+                    let msg = if self.rec.is_portable() {
+                        "not in this portable session (it can only show the rows and filters it was exported with)"
+                    } else if span <= WINDOW_MAX_S {
+                        "filtering…"
+                    } else {
+                        "filtering session… (zoom in to preview)"
+                    };
                     painter.text(r.center(), Align2::CENTER_CENTER, msg, small.clone(), MUTED);
-                    if span <= WINDOW_MAX_S {
+                    if span <= WINDOW_MAX_S && !self.rec.is_portable() {
                         need_window.push(self.rows[i].spec.clone());
                     }
                 }

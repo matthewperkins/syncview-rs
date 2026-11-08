@@ -46,7 +46,22 @@ pub fn is_video(p: &Path) -> bool {
 pub fn videos(dir: &Path, recs: &[PathBuf]) -> Vec<PathBuf> {
     let mut all = vec![];
     walk(dir, 6, &mut all);
-    all.into_iter().filter(|p| is_video(p) && !recs.iter().any(|r| p.starts_with(r))).collect()
+    // (videos inside a recording's folder aren't its videos; inside a portable session's they are)
+    all.into_iter().filter(|p| is_video(p) && !recs.iter().any(|r| !crate::portable::is_session(r) && p.starts_with(r))).collect()
+}
+
+/// Open Ephys recordings (folders with structure.oebin, .nwb files) and portable sessions under
+/// `dir`, or `dir` itself if it is a portable session.
+pub fn find_recordings(dir: &Path) -> Vec<PathBuf> {
+    if crate::portable::is_session(dir) {
+        return vec![dir.to_path_buf()];
+    }
+    let mut v = openephys::find_recordings(dir, 6);
+    let mut all = vec![];
+    walk(dir, 3, &mut all);
+    v.extend(all.into_iter().filter(|p| p.is_dir() && crate::portable::is_session(p)));
+    v.sort();
+    v
 }
 
 /// Preset JSON files at the top of `dir`.
@@ -74,7 +89,7 @@ pub fn resolve(dir: &Path, want_video: bool, want_preset: bool) -> Result<Found>
     if !dir.is_dir() {
         bail!("{} is not a folder", dir.display());
     }
-    let recs = openephys::find_recordings(dir, 6);
+    let recs = find_recordings(dir);
     let rec = match recs.as_slice() {
         [] => bail!("no Open Ephys recording (a folder containing structure.oebin, or an NWB file) in {}", dir.display()),
         [r] => r.clone(),
