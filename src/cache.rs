@@ -6,6 +6,9 @@
 //!             min{k}.npy max{k}.npy  min/max over blocks of FACTOR**k level-0 samples (k >= 1)
 //!             (all float16; float32 in caches from before v0.1.6 and Python's, which still load)
 //!             meta.json              written last; its presence marks a complete trace
+//!
+//! A portable session's traces (portable.rs) may leave out the finest levels: meta.json's
+//! "first_level" (absent: 0) is the finest one present; below it the view draws steps.
 
 use crate::filters::{out_step, pad_samples, process, process_from, spec_key};
 use crate::npy::{self, F32Array, SampleSlice, Samples};
@@ -28,10 +31,13 @@ const CHUNK_S: f64 = 600.0; // seconds of data processed per chunk (plus filter 
 const BLOCK_S: f64 = 5.0;
 
 pub struct Trace {
-    pub y: Samples,
+    /// Level 0, the processed trace itself (absent in a portable session's coarser traces).
+    pub y: Option<Samples>,
     pub dt: f64,
     pub t0: f64,
-    pub mins: Vec<Samples>, // level k >= 1 (level 0 is y)
+    /// The finest level present (0: y).
+    pub first: usize,
+    pub mins: Vec<Samples>, // levels first.max(1), first.max(1) + 1, …
     pub maxs: Vec<Samples>,
     pub stats: Map<String, Value>,
 }
@@ -47,26 +53,43 @@ impl Trace {
             maxs.push(Samples::F32(F32Array::Owned(mx.clone())));
         }
         let stats = stats(SampleSlice::F32(&y));
-        Trace { y: Samples::F32(F32Array::Owned(y)), dt, t0, mins, maxs, stats }
+        Trace { y: Some(Samples::F32(F32Array::Owned(y))), dt, t0, first: 0, mins, maxs, stats }
     }
 
     fn open(folder: &Path) -> Result<Self> {
         let meta: Value = serde_json::from_str(&std::fs::read_to_string(folder.join("meta.json"))?)?;
         let levels = meta["levels"].as_u64().context("meta.json: levels")? as usize;
+        let first = meta["first_level"].as_u64().unwrap_or(0) as usize;
         let mut mins = vec![];
         let mut maxs = vec![];
-        for k in 1..=levels {
+        for k in first.max(1)..=levels {
             mins.push(npy::load_samples(&folder.join(format!("min{k}.npy")))?);
             maxs.push(npy::load_samples(&folder.join(format!("max{k}.npy")))?);
         }
         Ok(Trace {
-            y: npy::load_samples(&folder.join("level0.npy"))?,
+            y: if first == 0 { Some(npy::load_samples(&folder.join("level0.npy"))?) } else { None },
             dt: meta["dt"].as_f64().context("meta.json: dt")?,
             t0: 0.0,
+            first,
             mins,
             maxs,
             stats: meta["stats"].as_object().cloned().unwrap_or_default(),
         })
+    }
+
+    /// The coarsest level present.
+    fn top(&self) -> usize {
+        if self.mins.is_empty() { self.first } else { self.first.max(1) + self.mins.len() - 1 }
+    }
+
+    /// Level k's (min, max) arrays (level 0: the trace, twice); None if it isn't present.
+    fn level(&self, k: usize) -> Option<(SampleSlice<'_>, SampleSlice<'_>)> {
+        if k == 0 {
+            let y = self.y.as_ref()?.slice();
+            return Some((y, y));
+        }
+        let i = k.checked_sub(self.first.max(1))?;
+        Some((self.mins.get(i)?.slice(), self.maxs.get(i)?.slice()))
     }
 
     pub fn stat(&self, k: &str) -> Option<f64> {
@@ -84,8 +107,10 @@ impl Trace {
         let (t_lo, t_hi) = (t_lo - off, t_hi - off);
         let span = t_hi - t_lo;
         let per_px = span / self.dt / n_px;
-        let y = self.y.slice();
-        if per_px < 2.0 {
+        if per_px < 2.0
+            && let Some(y) = &self.y
+        {
+            let y = y.slice();
             let a = ((t_lo / self.dt).floor() as i64 - 1).max(0) as usize;
             let b = (((t_hi / self.dt).ceil() as i64 + 2).max(0) as usize).min(y.len());
             for i in a..b.max(a) {
@@ -94,9 +119,23 @@ impl Trace {
             }
             return;
         }
-        let k = ((per_px.ln() / (FACTOR as f64).ln()) as usize).min(self.mins.len());
+        let ideal = if per_px < 1.0 { 0 } else { (per_px.ln() / (FACTOR as f64).ln()) as usize };
+        let k = ideal.min(self.top()).max(self.first);
+        let Some((mn, mx)) = self.level(k) else { return };
         let blk = self.dt * (FACTOR as f64).powi(k as i32);
-        let (mn, mx) = if k == 0 { (y, y) } else { (self.mins[k - 1].slice(), self.maxs[k - 1].slice()) };
+        if k > ideal {
+            // a portable session without this zoom's level: each block of the finest level
+            // present, drawn as a step (its min and max over its whole width)
+            let b0 = ((t_lo / blk).floor().max(0.0) as usize).min(mn.len());
+            let b1 = ((t_hi / blk).ceil().max(0.0) as usize + 1).min(mn.len());
+            for b in b0..b1 {
+                let (lo, hi) = (mn.get(b), mx.get(b));
+                let (ta, tb) = (off + b as f64 * blk, off + (b + 1) as f64 * blk);
+                xs.extend([ta, ta, tb, tb]);
+                ys.extend([lo, hi, hi, lo]);
+            }
+            return;
+        }
         let w = span / n_px;
         let m0 = (t_lo / w).floor() as i64 - 1;
         let m1 = (t_hi / w).ceil() as i64 + 1;
@@ -105,7 +144,7 @@ impl Trace {
         for m in m0..m1 {
             let e1 = edge(m + 1);
             if e1 > e0 {
-                let (lo, hi) = if k == 0 { y.min_max(e0, e1) } else { (mn.min_max(e0, e1).0, mx.min_max(e0, e1).1) };
+                let (lo, hi) = if k == 0 { mn.min_max(e0, e1) } else { (mn.min_max(e0, e1).0, mx.min_max(e0, e1).1) };
                 let t = off + (m as f64 + 0.5) * w;
                 xs.extend([t, t]);
                 ys.extend([lo, hi]);
@@ -689,4 +728,56 @@ pub fn platform_root() -> PathBuf {
         let _ = std::fs::rename(&old, &root);
     }
     root
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    /// A trace without its finest levels (as a portable session keeps it), from a full one.
+    fn coarser(t: &Trace, first: usize) -> Trace {
+        let drop = first - 1; // levels 1..first-1 are left out
+        let c = |v: &Samples| match v {
+            Samples::F32(F32Array::Owned(x)) => Samples::F32(F32Array::Owned(x.clone())),
+            _ => unreachable!(),
+        };
+        Trace {
+            y: None,
+            dt: t.dt,
+            t0: t.t0,
+            first,
+            mins: t.mins[drop..].iter().map(c).collect(),
+            maxs: t.maxs[drop..].iter().map(c).collect(),
+            stats: t.stats.clone(),
+        }
+    }
+
+    #[test]
+    fn a_trace_without_its_finest_levels_draws_the_same_above_them() {
+        // 10 min at 30 kHz of something spiky
+        let fs = 30_000.0;
+        let y: Vec<f32> = (0..18_000_000u64).map(|i| ((i as f32 * 0.37).sin() * 50.0 + if i % 9973 == 0 { 900.0 } else { 0.0 })).collect();
+        let full = Trace::from_samples(0.0, 1.0 / fs, y);
+        for first in [1usize, 2] {
+            let part = coarser(&full, first);
+            // 3000 columns (a Retina chart): exact once a column holds >= FACTOR^first samples
+            for span in [0.8, 3.2, 10.0, 60.0, 600.0] {
+                let per_px = ((100.0 + span) - 100.0) / (1.0 / fs) / 3000.0; // as view() computes it
+                let (mut xa, mut ya, mut xb, mut yb) = (vec![], vec![], vec![], vec![]);
+                full.view(100.0, 100.0 + span, 3000.0, &mut xa, &mut ya);
+                part.view(100.0, 100.0 + span, 3000.0, &mut xb, &mut yb);
+                // exact wherever the full trace itself draws from a level the portable one keeps
+                let ideal = if per_px < 1.0 { 0 } else { (per_px.ln() / (FACTOR as f64).ln()) as usize };
+                if ideal >= first {
+                    assert_eq!((xa, ya), (xb, yb), "first level {first}, span {span} s");
+                } else {
+                    // finer than it keeps: steps, still covering the view and its extremes
+                    assert!(!xb.is_empty(), "first level {first}, span {span} s: nothing drawn");
+                    let ext = |v: &[f32]| (v.iter().cloned().fold(f32::INFINITY, f32::min), v.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+                    let (a, b) = (ext(&ya), ext(&yb));
+                    assert!(b.0 <= a.0 && b.1 >= a.1, "first level {first}, span {span} s: extremes lost");
+                }
+            }
+        }
+    }
 }
