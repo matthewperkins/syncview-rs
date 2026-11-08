@@ -901,6 +901,11 @@ impl App {
         (self.layout.float_video && self.has_video()) || self.layout.float_chart
     }
 
+    /// Whether the videos are drawn over the chart (only where the boxes can overlap).
+    fn video_above(&self) -> bool {
+        self.layout.video_above && self.floating() && self.has_video()
+    }
+
     /// Where the videos and the chart go in the viewing area `a`: each is its floating box, or
     /// else the videos are fitted side by side into the area and the chart fills it.
     fn boxes(&self, a: Rect) -> (Vec<Rect>, Rect) {
@@ -942,31 +947,45 @@ impl App {
         if !self.layout.locked {
             let fx = |b: Rect| (b.min.x - a.min.x) / a.width();
             let fy = |b: Rect| (b.min.y - a.min.y) / a.height();
-            if self.layout.float_video {
-                // later videos are drawn on top, so they take the drag where boxes overlap
-                for (i, v) in videos.iter().enumerate() {
-                    let k = self.cams[i].aspect();
-                    let b = drag_box(ui, a, &format!("video_box{i}"), *v, Some(k), Vec2::new(80.0, 80.0 * k));
-                    self.set_video_frac(i, [fx(b), fy(b), b.width() / a.width()]);
+            // what is drawn on top takes the drag where boxes overlap (the later drag_box wins)
+            let above = self.video_above();
+            for pass in [above, !above] {
+                if pass && self.layout.float_chart {
+                    let b = drag_box(ui, a, "chart_box", chart, None, Vec2::new(240.0, 140.0));
+                    self.layout.chart = [fx(b), fy(b), b.width() / a.width(), b.height() / a.height()];
                 }
-            }
-            if self.layout.float_chart {
-                let b = drag_box(ui, a, "chart_box", chart, None, Vec2::new(240.0, 140.0));
-                self.layout.chart = [fx(b), fy(b), b.width() / a.width(), b.height() / a.height()];
+                if !pass && self.layout.float_video {
+                    // later videos are drawn on top, so they take the drag where boxes overlap
+                    for (i, v) in videos.iter().enumerate() {
+                        let k = self.cams[i].aspect();
+                        let b = drag_box(ui, a, &format!("video_box{i}"), *v, Some(k), Vec2::new(80.0, 80.0 * k));
+                        self.set_video_frac(i, [fx(b), fy(b), b.width() / a.width()]);
+                    }
+                }
             }
         }
         let (videos, chart) = self.boxes(a);
         let p = ui.painter_at(a);
         p.rect_filled(a, 0.0, BG);
-        for (i, v) in videos.iter().enumerate() {
-            self.paint_cam(&p, i, *v);
-            let under = v.intersect(chart);
-            if self.layout.dim > 0.0 && under.is_positive() {
-                p.rect_filled(under, 0.0, Color32::from_black_alpha((self.layout.dim.clamp(0.0, 1.0) * 255.0) as u8));
+        let above = self.video_above();
+        if !above {
+            for (i, v) in videos.iter().enumerate() {
+                self.paint_cam(&p, i, *v);
+                let under = v.intersect(chart);
+                if self.layout.dim > 0.0 && under.is_positive() {
+                    p.rect_filled(under, 0.0, Color32::from_black_alpha((self.layout.dim.clamp(0.0, 1.0) * 255.0) as u8));
+                }
             }
         }
         let pointer_in = ui.ui_contains_pointer() && ui.ctx().pointer_hover_pos().is_some_and(|q| chart.contains(q));
         self.traces_ui(ui, chart, &resp, pointer_in);
+        if above {
+            // after the chart (traces, events, cursor, time axis), so the videos cover it
+            let p = ui.painter_at(a);
+            for (i, v) in videos.iter().enumerate() {
+                self.paint_cam(&p, i, *v);
+            }
+        }
         if !self.layout.locked {
             // arrange mode: outline each floating box and mark its resize corner
             let mut floating: Vec<Rect> = if self.layout.float_video { videos } else { vec![] };
@@ -1307,7 +1326,15 @@ impl App {
             {
                 self.layout.float_chart = !self.layout.float_chart;
             }
+            let above = self.video_above();
             if self.floating() {
+                if ui
+                    .add_enabled(self.has_video(), egui::Button::selectable(self.layout.video_above, "Video above"))
+                    .on_hover_text("draw the video over the chart, hiding the traces where they overlap")
+                    .clicked()
+                {
+                    self.layout.video_above = !self.layout.video_above;
+                }
                 let lock = if self.layout.locked { "🔒" } else { "🔓" };
                 if ui.add(egui::Button::selectable(self.layout.locked, lock))
                     .on_hover_text(if self.layout.locked {
@@ -1319,13 +1346,28 @@ impl App {
                 {
                     self.layout.locked = !self.layout.locked;
                 }
-                ui.label("dim").on_hover_text("darken the video where the chart covers it");
-                ui.add(egui::Slider::new(&mut self.layout.dim, 0.0..=0.9).show_value(false)).on_hover_text(format!("{:.0} % darker", self.layout.dim * 100.0));
+                ui.add_enabled_ui(!above, |ui| {
+                    ui.label("dim").on_hover_text("darken the video where the chart covers it");
+                    ui.add(egui::Slider::new(&mut self.layout.dim, 0.0..=0.9).show_value(false))
+                        .on_hover_text(format!("{:.0} % darker", self.layout.dim * 100.0))
+                        .on_disabled_hover_text("no effect while the video is above the chart");
+                });
             }
-            ui.checkbox(&mut self.layout.outline, "outline").on_hover_text("a dark line under each trace, so it stands out (e.g. over the video)");
-            if self.layout.outline {
-                ui.add(egui::DragValue::new(&mut self.layout.outline_px).range(0.5..=4.0).speed(0.05).max_decimals(1).suffix(" px"))
-                    .on_hover_text("how far the outline extends beyond the trace on each side");
+            ui.add_enabled_ui(!above, |ui| {
+                ui.checkbox(&mut self.layout.outline, "outline")
+                    .on_hover_text("a dark line under each trace, so it stands out (e.g. over the video)")
+                    .on_disabled_hover_text("no effect while the video is above the chart");
+                if self.layout.outline {
+                    ui.add(egui::DragValue::new(&mut self.layout.outline_px).range(0.5..=4.0).speed(0.05).max_decimals(1).suffix(" px"))
+                        .on_hover_text("how far the outline extends beyond the trace on each side");
+                }
+            });
+            if ui
+                .add(egui::Button::selectable(self.layout.hide_ylabels, "Hide y labels"))
+                .on_hover_text("leave out the row names and y-axis numbers, so the traces use that width")
+                .clicked()
+            {
+                self.layout.hide_ylabels = !self.layout.hide_ylabels;
             }
             ui.separator();
             if ui.button("?").on_hover_text("keys and mouse (?)").clicked() {
@@ -2205,7 +2247,8 @@ impl App {
     fn traces_ui(&mut self, ui: &mut egui::Ui, rect: Rect, resp: &egui::Response, pointer_in: bool) {
         let painter = ui.painter_at(rect);
         let ppp = ui.ctx().pixels_per_point();
-        let x0 = rect.left() + MARGIN_X + LABEL_W + YAXIS_W;
+        let labels = !self.layout.hide_ylabels;
+        let x0 = rect.left() + MARGIN_X + if labels { LABEL_W + YAXIS_W } else { 2.0 };
         let x1 = rect.right() - MARGIN_X;
         let top = rect.top() + 4.0;
         let bottom = rect.bottom() - 2.0 - TAXIS_H;
@@ -2233,7 +2276,9 @@ impl App {
         };
         for i in 0..n {
             let r = Rect::from_min_max(Pos2::new(x0, top + i as f32 * (row_h + ROW_GAP)), Pos2::new(x1, top + i as f32 * (row_h + ROW_GAP) + row_h));
-            painter.text(Pos2::new(x0 - YAXIS_W - 4.0, r.center().y), Align2::RIGHT_CENTER, self.rows[i].spec.title(), font.clone(), LABEL);
+            if labels {
+                painter.text(Pos2::new(x0 - YAXIS_W - 4.0, r.center().y), Align2::RIGHT_CENTER, self.rows[i].spec.title(), font.clone(), LABEL);
+            }
             let tr = self.trace_for(&self.rows[i]);
             let (lo, hi) = self.row_ylim(i, tr.as_deref());
             // y axis: few, round ticks so stacked rows' labels don't collide
@@ -2250,7 +2295,7 @@ impl App {
                 let k1 = (hi / step).floor() as i64;
                 (k0..=k1).map(|k| (k as f64 * step, step)).collect()
             };
-            for (v, step) in ticks {
+            for (v, step) in ticks.into_iter().filter(|_| labels) {
                 let y = ymap(v);
                 painter.line_segment([Pos2::new(ax - 4.0, y), Pos2::new(ax, y)], Stroke::new(1.0, FG));
                 painter.text(Pos2::new(ax - 6.0, y), Align2::RIGHT_CENTER, fmt_tick(v, step), small.clone(), FG);
@@ -2292,7 +2337,7 @@ impl App {
                             [((x - t) / (span / 2.0)) as f32, (1.0 - 2.0 * (sy - a_top) / a_h) as f32]
                         })
                         .collect();
-                    let outline = self.layout.outline.then_some(self.layout.outline_px);
+                    let outline = (self.layout.outline && !self.video_above()).then_some(self.layout.outline_px);
                     let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(area, ppp), outline };
                     // the layer's own painter, so the clip can reach past this panel (video, overview)
                     ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area).add(egui_wgpu::Callback::new_paint_callback(area, cb));

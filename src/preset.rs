@@ -177,6 +177,10 @@ pub struct Layout {
     /// A dark line under each trace, extending outline_px beyond it on each side.
     pub outline: bool,
     pub outline_px: f32,
+    /// When boxes float, the videos are drawn over the chart (hiding it where they overlap).
+    pub video_above: bool,
+    /// Leave out the row names and y-axis numbers; the traces take their width.
+    pub hide_ylabels: bool,
 }
 
 impl Default for Layout {
@@ -190,6 +194,8 @@ impl Default for Layout {
             dim: 0.4,
             outline: false,
             outline_px: 1.5,
+            video_above: false,
+            hide_ylabels: false,
         }
     }
 }
