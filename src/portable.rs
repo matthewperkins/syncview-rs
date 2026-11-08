@@ -149,7 +149,8 @@ pub fn exact_down_to(fs: f64, first_level: usize, px: f64) -> f64 {
     px * (FACTOR as f64).powi(first_level as i32) / fs
 }
 
-/// Write a portable session of `specs` (all cached) into the new folder `out`.
+/// Write a portable session of `specs` (all cached) into the new folder `out`; with
+/// `copy_videos`, the videos too (so one folder carries everything).
 #[allow(clippy::too_many_arguments)]
 pub fn export(
     rec: &Recording,
@@ -159,6 +160,7 @@ pub fn export(
     videos: &[PathBuf],
     index_dir: &Path,
     first_level: usize,
+    copy_videos: bool,
     out: &Path,
     progress: &dyn Fn(f32),
 ) -> Result<()> {
@@ -180,7 +182,8 @@ pub fn export(
         infos.push(TraceInfo { key: key.clone(), label: s.title(), first_level: from });
         plan.push((key, dir, from, files));
     }
-    let total: u64 = plan.iter().flat_map(|p| p.3.iter()).filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum::<u64>().max(1);
+    let video_bytes: u64 = if copy_videos { videos.iter().filter_map(|v| v.metadata().ok()).map(|m| m.len()).sum() } else { 0 };
+    let total: u64 = (plan.iter().flat_map(|p| p.3.iter()).filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum::<u64>() + video_bytes).max(1);
     let mut done = 0u64;
     for (key, dir, from, files) in &plan {
         let to = out.join("traces").join(key);
@@ -207,6 +210,12 @@ pub fn export(
         let size = std::fs::metadata(v)?.len();
         crate::npy::write_i64(&out.join("traces").join("video_index").join(crate::video::portable_index_name(&name, size)), &pts)?;
         vids.push(VideoInfo { name, size });
+    }
+    if copy_videos {
+        for v in videos {
+            let name = v.file_name().context("a video without a file name")?;
+            done += copy_with_progress(v, &out.join(name), &mut |n| progress(((done + n) as f64 / total as f64) as f32))?;
+        }
     }
     std::fs::write(out.join("preset.json"), serde_json::to_string_pretty(preset)? + "\n")?;
     let ann = crate::annotations::file_for(&rec.home);

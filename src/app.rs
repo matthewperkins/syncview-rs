@@ -210,6 +210,10 @@ pub struct App {
     list_scroll: bool,
     /// The key reference (?) is showing.
     help: bool,
+    /// The portable-session export window.
+    portable: PortableUi,
+    /// The chart's width in physical pixels, last frame (for the portable export's exact-zoom note).
+    plot_px: f32,
     /// The primed label (the "brush"): the stamp key (`, top left) marks it at the frame on screen.
     primed: Option<String>,
     /// Audit mode: score from the video alone (traces and earlier marks hidden; events marked now
@@ -327,6 +331,28 @@ enum FileDialog {
     SavePreset,
     Video,
     SaveClip(ClipPlan),
+    /// The folder for a portable session (detail level, copy the videos too).
+    SavePortable(usize, bool),
+}
+
+/// The portable-session export window (see portable.rs).
+struct PortableUi {
+    open: bool,
+    /// The finest pyramid level kept for full-rate rows (1, 2 or 3).
+    level: usize,
+    copy_videos: bool,
+    /// Bytes of traces at levels 1..=3 (worked out when the window opens).
+    sizes: Vec<u64>,
+    /// Rows not filtered yet when the sizes were worked out.
+    missing: usize,
+    run: Option<PortableRun>,
+    msg: Option<(String, bool)>,
+}
+
+struct PortableRun {
+    progress: Arc<std::sync::Mutex<f32>>,
+    rx: std::sync::mpsc::Receiver<Result<(PathBuf, u64), String>>,
+    started: Instant,
 }
 
 /// A clip export whose settings have been checked, waiting for where to save it.
@@ -378,6 +404,23 @@ impl Drop for App {
     fn drop(&mut self) {
         self.autosave(std::time::Duration::ZERO);
     }
+}
+
+/// Total size of the files in a folder (and its subfolders).
+fn folder_size(dir: &std::path::Path) -> u64 {
+    let mut n = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                n += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    n
 }
 
 /// The Clip column: a three-position slider switch (row | chart | none); click or drag a stop.
@@ -543,6 +586,8 @@ impl App {
             audit: false,
             primed: None,
             help: false,
+            portable: PortableUi { open: false, level: 1, copy_videos: false, sizes: vec![], missing: 0, run: None, msg: None },
+            plot_px: 1500.0,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.home),
@@ -1224,14 +1269,27 @@ impl App {
             ui.separator();
             self.videos_menu(ui);
             let can_export = self.cam0().is_some();
-            if ui
-                .add_enabled(can_export, egui::Button::new("Export clip…"))
-                .on_hover_text("save the video with the traces scrolling underneath as an MP4")
-                .on_disabled_hover_text("attach a video first")
-                .clicked()
-            {
-                self.open_export();
-            }
+            let portable = self.rec.is_portable();
+            ui.menu_button("Export", |ui| {
+                if ui
+                    .add_enabled(can_export, egui::Button::new("Video clip…"))
+                    .on_hover_text("save the video with the traces scrolling underneath as an MP4")
+                    .on_disabled_hover_text("attach a video first")
+                    .clicked()
+                {
+                    self.open_export();
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(!portable, egui::Button::new("Portable session…"))
+                    .on_hover_text("a small folder for viewing and annotating this recording elsewhere, without the recording")
+                    .on_disabled_hover_text("this is already a portable session")
+                    .clicked()
+                {
+                    self.open_portable();
+                    ui.close();
+                }
+            });
             ui.separator();
             let has_video = self.has_video();
             if ui
@@ -1407,6 +1465,7 @@ impl App {
                     self.export.msg = Some((e, true));
                 }
             }
+            FileDialog::SavePortable(level, copy_videos) => self.run_portable(ctx, path, level, copy_videos),
         }
     }
 
@@ -2157,6 +2216,7 @@ impl App {
         }
         let row_h = ((bottom - top) - ROW_GAP * (n as f32 - 1.0)) / n as f32;
         let plot_w = x1 - x0;
+        self.plot_px = plot_w * ppp;
         let (t, span) = (self.t, self.span);
         let (t_lo, t_hi) = (t - span / 2.0, t + span / 2.0);
         let mut need_window = vec![];
@@ -2477,6 +2537,149 @@ impl App {
         e.open = true;
     }
 
+    /// What a portable session holds: the shown rows and the overview.
+    fn portable_specs(&self) -> Vec<Spec> {
+        let mut v: Vec<Spec> = self.rows.iter().map(|r| r.spec.clone()).collect();
+        v.extend(self.overview.clone());
+        v
+    }
+
+    fn open_portable(&mut self) {
+        let specs = self.portable_specs();
+        self.portable.sizes = (1..=3).map(|l| crate::portable::estimate(&self.cache, &specs, l)).collect();
+        self.portable.missing = specs.iter().filter(|s| self.cache.get(s).is_none()).count();
+        self.portable.open = true;
+    }
+
+    /// Write the portable session into `path` (a new folder) in the background.
+    fn run_portable(&mut self, ctx: &egui::Context, path: PathBuf, level: usize, copy_videos: bool) {
+        let (rec, cache, specs, preset) = (self.rec.clone(), self.cache.clone(), self.portable_specs(), self.preset());
+        let videos: Vec<PathBuf> = self.cams.iter().map(|c| c.dec.path.clone()).collect();
+        let index_dir = self.cache.root.join("video_index");
+        let progress = Arc::new(std::sync::Mutex::new(0.0f32));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (p2, c2) = (progress.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = crate::portable::export(&rec, &cache, &specs, &preset, &videos, &index_dir, level, copy_videos, &path, &|f| {
+                *p2.lock().unwrap() = f;
+                c2.request_repaint();
+            });
+            let size = r.as_ref().ok().map(|_| folder_size(&path)).unwrap_or(0);
+            let _ = tx.send(r.map(|_| (path, size)).map_err(|e| format!("{e:#}")));
+            c2.request_repaint();
+        });
+        self.portable.run = Some(PortableRun { progress, rx, started: Instant::now() });
+        self.portable.msg = None;
+    }
+
+    /// The portable-session window: what goes in, how much detail, where it goes.
+    fn portable_ui(&mut self, ctx: &egui::Context) {
+        if let Some(run) = &self.portable.run {
+            match run.rx.try_recv() {
+                Ok(Ok((path, size))) => {
+                    self.portable.msg = Some((
+                        format!(
+                            "Wrote {} ({}) in {:.0} s. Copy that folder{} to the other computer and open it in syncview there; \
+                             annotations made there are saved in it, and its syncview_annotations.csv can come back next to the recording.",
+                            path.display(),
+                            if size >= 1_000_000_000 { format!("{:.1} GB", size as f64 / 1e9) } else { format!("{:.0} MB", (size as f64 / 1e6).max(1.0)) },
+                            run.started.elapsed().as_secs_f64(),
+                            if self.portable.copy_videos { "" } else { " and the videos (into it)" }
+                        ),
+                        false,
+                    ));
+                    self.status = format!("portable session written to {}", path.display());
+                    self.portable.run = None;
+                }
+                Ok(Err(e)) => {
+                    self.portable.msg = Some((e, true));
+                    self.portable.run = None;
+                }
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
+        }
+        if !self.portable.open {
+            return;
+        }
+        let specs = self.portable_specs();
+        let missing = specs.iter().filter(|s| self.cache.get(s).is_none()).count();
+        let building = *self.builder.progress.lock().unwrap();
+        let video_bytes: u64 = self.cams.iter().filter_map(|c| c.dec.path.metadata().ok()).map(|m| m.len()).sum();
+        let gb = |b: u64| match b {
+            1_000_000_000.. => format!("{:.1} GB", b as f64 / 1e9),
+            1_000_000.. => format!("{:.0} MB", b as f64 / 1e6),
+            _ => "under 1 MB".to_string(),
+        };
+        if missing != self.portable.missing {
+            // rows finished filtering while the window was open: their sizes count now
+            self.portable.missing = missing;
+            self.portable.sizes = (1..=3).map(|l| crate::portable::estimate(&self.cache, &specs, l)).collect();
+        }
+        let mut open = true;
+        let mut choose = false;
+        egui::Window::new("Portable session").open(&mut open).collapsible(false).resizable(false).default_width(520.0).show(ctx, |ui| {
+            let running = self.portable.run.is_some();
+            ui.label(
+                "A folder for viewing and annotating this recording elsewhere, without the recording: the shown rows as \
+                 filtered now, the camera triggers, the videos' frame indexes, the preset and the annotations.",
+            );
+            ui.add_space(6.0);
+            ui.add_enabled_ui(!running, |ui| {
+                ui.label(egui::RichText::new("Detail of the full-rate (EMG) rows").color(LABEL));
+                for (i, name) in ["fine", "medium", "coarse"].iter().enumerate() {
+                    let level = i + 1;
+                    let size = self.portable.sizes.get(i).copied().unwrap_or(0);
+                    let exact = crate::portable::exact_down_to(self.rec.fs, level, self.plot_px as f64);
+                    ui.radio_value(
+                        &mut self.portable.level,
+                        level,
+                        format!("{name}: {}, exact down to {:.2} s across this chart, steps below that", gb(size), exact),
+                    );
+                }
+                ui.label(egui::RichText::new("Slow, envelope and band-power rows are always kept whole (they are small).").small().color(MUTED));
+                ui.add_space(4.0);
+                if !self.cams.is_empty() {
+                    ui.checkbox(&mut self.portable.copy_videos, format!("copy the videos into it too ({})", gb(video_bytes)));
+                }
+            });
+            ui.add_space(6.0);
+            if missing > 0 {
+                let why = match building {
+                    Some(f) => format!("{missing} row(s) are still being filtered ({:.0} %); the session can be made when they are done.", f * 100.0),
+                    None => format!("{missing} row(s) aren't filtered yet."),
+                };
+                ui.label(egui::RichText::new(why).color(Color32::from_rgb(0xe0, 0xb0, 0x60)));
+            }
+            if let Some(run) = &self.portable.run {
+                let f = *run.progress.lock().unwrap();
+                ui.add(egui::ProgressBar::new(f).text(format!("writing {:.0} %", f * 100.0)));
+            } else if ui.add_enabled(missing == 0, egui::Button::new("Choose where to save…")).clicked() {
+                choose = true;
+            }
+            if let Some((m, err)) = &self.portable.msg {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(m).color(if *err { Color32::from_rgb(0xe0, 0x70, 0x60) } else { FG }));
+            }
+        });
+        self.portable.open = open || self.portable.run.is_some();
+        if choose {
+            let name = format!(
+                "{} syncview session",
+                self.rec.rec_dir.components().rev().take(4).collect::<Vec<_>>().into_iter().rev().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join(" ")
+            );
+            let mut d = rfd::FileDialog::new().set_title("New folder for the portable session").set_file_name(&name);
+            if let Some(dir) = self.rec.home.parent() {
+                d = d.set_directory(dir);
+            }
+            let (level, copy) = (self.portable.level, self.portable.copy_videos);
+            match std::env::var_os("SYNCVIEW_RS_TEST_SAVE") {
+                // (testing: the folder to save to, without the dialog)
+                Some(p) => self.run_portable(ctx, PathBuf::from(p), level, copy),
+                None => self.open_dialog(ctx, FileDialog::SavePortable(level, copy), d, true),
+            }
+        }
+    }
+
     fn export_ui(&mut self, ctx: &egui::Context) {
         // a running export: progress, or its result
         if let Some(run) = &self.export.run {
@@ -2733,6 +2936,7 @@ impl App {
             self.open_export();
         }
         self.export_ui(&ctx);
+        self.portable_ui(&ctx);
         if self.playing {
             ctx.request_repaint();
         }

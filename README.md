@@ -59,7 +59,8 @@ the current view).*
 ## Contents
 
 [Install](#install) · [Try it without a rig](#try-it-without-a-rig) · [Opening recordings](#opening-recordings) ·
-[The viewer](#the-viewer) · [Annotating events](#annotating-events) · [Export a clip](#export-a-clip) ·
+[The viewer](#the-viewer) · [Annotating events](#annotating-events) ·
+[Portable sessions](#portable-sessions-annotate-away-from-the-recording) · [Export a clip](#export-a-clip) ·
 [How it draws](#how-it-draws) · [Checked](#checked) · [About](#about)
 
 ## Install
@@ -189,6 +190,8 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 | `--cache FOLDER` | `$SYNCVIEW_RS_CACHE`, else `~/.cache/syncview-rs` (Linux), `~/Library/Caches/syncview-rs` (macOS) | filtered traces |
 | `--time S`, `--time-base S`, `--play` | | initial position, view width, start playing |
 | `--install-desktop` | | Linux: add syncview to the application launcher |
+| `--export-portable DIR` | | filter, then write a [portable session](#portable-sessions-annotate-away-from-the-recording) into the new folder DIR and exit |
+| `--portable-detail N`, `--portable-videos` | `1` | its detail (1 fine, 2 medium, 3 coarse) and whether to copy the videos into it |
 
 ## The viewer
 
@@ -293,9 +296,32 @@ starting within 100 ms) and the mean onset and offset differences over the audit
 - Saves are atomic, a file that can't be read is never overwritten, and columns from a newer version
   are kept.
 
+## Portable sessions: annotate away from the recording
+
+A 32-channel, 30 kHz recording of a few hours is tens of gigabytes; you don't need it to look and
+annotate. **Export → Portable session…** writes a small folder with what the viewer draws from:
+the shown rows as filtered now, the camera triggers, the videos' frame indexes (so they open without
+re-indexing), the preset and the annotations so far. Copy the folder (and the videos, or tick
+*copy the videos into it too*) to the other computer, and open it there like a recording: from the
+start page, or `syncview FOLDER`.
+
+Full-rate rows keep their min/max outline down to a chosen detail; the window shows each one's size
+and the narrowest view it draws exactly at your chart's width (below that the trace draws as steps):
+
+| detail | 30 kHz, 32 rows, 3 h (approx.) | exact down to (1500 px chart) |
+|---|---|---|
+| fine | 6 GB | 0.4 s |
+| medium | 0.7 GB | 3.2 s |
+| coarse | 80 MB | 26 s |
+
+Slow, envelope and band-power rows are always kept whole. The session uses the filter settings it
+was made with; rows or settings that weren't exported say so instead of drawing. Annotations made in
+it are saved in its `syncview_annotations.csv`, with the recording's own times and sample indexes,
+so the file can go back next to the recording.
+
 ## Export a clip
 
-**Export clip…** (in the toolbar, once a video is synced) saves an MP4 like Python syncview's
+**Export → Video clip…** (in the toolbar, once a video is synced) saves an MP4 like Python syncview's
 clips: the first video on top with a `t = … s   frame N` clock, and the rows shown underneath, with
 their colours and Y ranges, scrolling past a fixed cursor at each frame's trigger.
 

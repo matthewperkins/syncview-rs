@@ -133,6 +133,9 @@ struct Cli {
     /// for higher numbers
     #[arg(long, default_value_t = 1, value_name = "LEVEL")]
     portable_detail: usize,
+    /// with --export-portable: copy the videos into the session folder too
+    #[arg(long)]
+    portable_videos: bool,
     /// (testing) build this video's frame index both ways (container tables, full scan) and compare
     #[arg(long, hide = true, value_name = "VIDEO")]
     check_index: Option<PathBuf>,
@@ -314,7 +317,7 @@ fn main() -> Result<()> {
                 portable::exact_down_to(rec.fs, level, 1500.0)
             );
             let t0 = std::time::Instant::now();
-            portable::export(&rec, &cache, &specs, &p, &l.videos, &root.join("video_index"), level, out, &|f| eprint!("\rwriting {:.0}%", f * 100.0))?;
+            portable::export(&rec, &cache, &specs, &p, &l.videos, &root.join("video_index"), level, cli.portable_videos, out, &|f| eprint!("\rwriting {:.0}%", f * 100.0))?;
             eprintln!("\nsyncview: wrote {} in {:.1} s", out.display(), t0.elapsed().as_secs_f64());
         }
         return Ok(());
