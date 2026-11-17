@@ -19,6 +19,7 @@ mod oe;
 mod portable;
 mod preset;
 mod shell;
+mod spikes;
 mod splash;
 mod video;
 

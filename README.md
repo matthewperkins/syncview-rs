@@ -60,7 +60,7 @@ the current view).*
 
 [Install](#install) · [Try it without a rig](#try-it-without-a-rig) · [Opening recordings](#opening-recordings) ·
 [The viewer](#the-viewer) · [Annotating events](#annotating-events) ·
-[Portable sessions](#portable-sessions-annotate-away-from-the-recording) · [Export a clip](#export-a-clip) ·
+[Portable sessions](#portable-sessions-annotate-away-from-the-recording) · [Sorted spikes](#sorted-spikes) · [Export a clip](#export-a-clip) ·
 [How it draws](#how-it-draws) · [Checked](#checked) · [About](#about)
 
 ## Install
@@ -318,6 +318,24 @@ Slow, envelope and band-power rows are always kept whole. The session uses the f
 was made with; rows or settings that weren't exported say so instead of drawing. Annotations made in
 it are saved in its `syncview_annotations.csv`, with the recording's own times and sample indexes,
 so the file can go back next to the recording.
+
+## Sorted spikes
+
+A spike sorting pipeline can leave an export in the recording folder (`spikes_phy/`: the phy/Kilosort
+files plus a `syncview_spikes.json` manifest; the format is in
+[docs/spike-export.md](docs/spike-export.md)). syncview finds
+it, checks that it belongs to the recording, and adds a **Units** tab:
+
+- On each row whose channel has units, zoomed in to 2 s or less, every spike's stretch of trace (±1 ms)
+  is redrawn in its unit's colour, with a mark at the top of the row; zoomed out, ticks along the top.
+  A row's **Spikes** tick in the channel table turns this off.
+- The Units tab lists the units (wire, class, rate, SNR, pickup score; hover for every column),
+  with a tick to hide each one. Tagged units are drawn heavier.
+- Click a unit to select it; **Ctrl/Cmd + ← / →** then step through its spikes, and ↑ / ↓ move
+  between units.
+- **Raster lanes under the chart** adds a lane per shown unit below the rows, to compare firing
+  with the EMG.
+- Laser windows from the export are shaded on the brain rows.
 
 ## Export a clip
 

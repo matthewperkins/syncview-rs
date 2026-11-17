@@ -221,12 +221,46 @@ pub struct App {
     audit: bool,
     /// The last save error shown, so a failing disk doesn't raise the same dialog every second.
     save_error: Option<String>,
+    /// Sorted spikes (spikes.rs): the exports in the recording folder, the one shown, and why it
+    /// couldn't be read.
+    spike_dirs: Vec<PathBuf>,
+    spikes: Option<crate::spikes::Spikes>,
+    spikes_error: Option<String>,
+    hidden_units: std::collections::HashSet<i64>,
+    /// The unit selected in the Units tab (Ctrl/Cmd + arrows step through its spikes).
+    selected_unit: Option<i64>,
+    /// Raster lanes of the shown units under the chart rows.
+    raster: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum SideTab {
     Channels,
     Events,
+    Units,
+}
+
+/// Views at most this wide (s) draw each spike as its own stretch of trace in its unit's colour;
+/// wider ones draw ticks.
+const SPIKE_DETAIL_S: f64 = 2.0;
+/// How much trace either side of a spike is coloured (s).
+const SPIKE_HALF_S: f64 = 0.001;
+const RASTER_LANE_H: f32 = 10.0;
+
+fn unit_color(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Pixel columns (x) holding at least one of `times` (samples), for drawing many spikes as ticks.
+fn spike_columns(times: &[i64], fs: f64, tx: impl Fn(f64) -> f32) -> Vec<f32> {
+    let mut cols: Vec<f32> = vec![];
+    for &s in times {
+        let x = tx(s as f64 / fs).round();
+        if cols.last() != Some(&x) {
+            cols.push(x);
+        }
+    }
+    cols
 }
 
 /// Where a mark lands: time (s), sample index, and the reference video's frame.
@@ -545,7 +579,13 @@ impl App {
         let window_worker = WindowWorker::new(cache.clone(), move || c2.request_repaint());
         let frames: Vec<f64> = rec.rising_edges(opts.trigger_line).iter().map(|i| *i as f64 / rec.fs).collect();
         let t = opts.start_time.unwrap_or(frames.first().copied().unwrap_or(0.0)).clamp(0.0, rec.duration());
+        let spike_dirs = crate::spikes::find(&rec.home);
         let mut app = App {
+            spikes: None,
+            spikes_error: None,
+            hidden_units: Default::default(),
+            selected_unit: None,
+            raster: false,
             builder,
             window_worker,
             specs: vec![],
@@ -588,6 +628,7 @@ impl App {
             help: false,
             portable: PortableUi { open: false, level: 1, copy_videos: false, sizes: vec![], missing: 0, run: None, msg: None },
             plot_px: 1500.0,
+            spike_dirs,
             annotator: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
             ann: Annotations::load(
                 annotations::file_for(&rec.home),
@@ -611,6 +652,9 @@ impl App {
         }
         if opts.play {
             app.toggle_play();
+        }
+        if let Some(d) = app.spike_dirs.first().cloned() {
+            app.load_spikes(&d);
         }
         app
     }
@@ -1137,7 +1181,7 @@ impl App {
             }
             delete = i.consume_key(egui::Modifiers::NONE, Key::Delete) || i.consume_key(egui::Modifiers::NONE, Key::Backspace);
             // Up / Down walk the events list (while the Events tab is showing)
-            if self.side_open && self.side_tab == SideTab::Events {
+            if self.side_open && matches!(self.side_tab, SideTab::Events | SideTab::Units) {
                 for e in &i.events {
                     if let egui::Event::Key { key, pressed: true, modifiers, .. } = e
                         && !modifiers.any()
@@ -1153,7 +1197,16 @@ impl App {
             (hit, i.consume_key(egui::Modifiers::NONE, Key::Escape), undo, redo)
         });
         for d in step {
-            self.step_event(d);
+            if self.side_open && self.side_tab == SideTab::Units && self.selected_unit.is_some() {
+                self.step_spike(d);
+            } else {
+                self.step_event(d);
+            }
+        }
+        if self.side_open && self.side_tab == SideTab::Units {
+            for d in std::mem::take(&mut walk) {
+                self.walk_units(d);
+            }
         }
         for d in walk {
             self.walk_list(d);
@@ -1574,6 +1627,9 @@ impl App {
                  Click a row's number to select it for Up / Down / Remove, and as the template for Add.",
             );
             ui.selectable_value(&mut self.side_tab, SideTab::Events, "Events").on_hover_text("the events marked in this recording");
+            if !self.spike_dirs.is_empty() {
+                ui.selectable_value(&mut self.side_tab, SideTab::Units, "Units").on_hover_text("the sorted units (spike export next to the recording)");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("▶").on_hover_text("hide the sidebar (F2)").clicked() {
                     self.side_open = false;
@@ -1581,6 +1637,207 @@ impl App {
             });
         });
         ui.separator();
+    }
+
+    /// Read a spike export (one of `spike_dirs`); a problem is shown in the Units tab.
+    fn load_spikes(&mut self, dir: &std::path::Path) {
+        match crate::spikes::load(dir, self.rec.fs, self.rec.n_samples(), self.rec.first_sample_number()) {
+            Ok(s) => {
+                self.status = format!("{}: {} sorted units, {} spikes", s.name(), s.units.len(), s.n_spikes());
+                self.spikes = Some(s);
+                self.spikes_error = None;
+            }
+            Err(e) => {
+                self.spikes = None;
+                self.spikes_error = Some(format!("{}: {e:#}", dir.file_name().unwrap_or_default().to_string_lossy()));
+            }
+        }
+        self.selected_unit = None;
+        self.hidden_units.clear();
+    }
+
+    /// A row's sorted spikes: zoomed in, each spike's stretch of the trace redrawn in its unit's
+    /// colour (with a mark at the row's top); zoomed out, ticks in a lane per unit along the top.
+    #[allow(clippy::too_many_arguments)]
+    fn row_spikes(&self, p: &egui::Painter, ch: &str, trace_color: Color32, r: Rect, (lo, hi): (f64, f64), xs: &[f64], ys: &[f32], (t_lo, t_hi): (f64, f64), (x0, plot_w): (f32, f32)) {
+        let Some(sp) = &self.spikes else { return };
+        if self.audit {
+            return;
+        }
+        let units: Vec<&crate::spikes::Unit> = sp.units.iter().filter(|u| u.wire == ch && !self.hidden_units.contains(&u.id)).collect();
+        if units.is_empty() {
+            return;
+        }
+        let fs = self.rec.fs;
+        let span = t_hi - t_lo;
+        let tx = |t: f64| x0 + ((t - t_lo) / span) as f32 * plot_w;
+        let (a, b) = ((t_lo * fs).floor() as i64, (t_hi * fs).ceil() as i64 + 1);
+        if span <= SPIKE_DETAIL_S {
+            let sy = |y: f32| r.bottom() - ((y as f64 - lo) / (hi - lo)) as f32 * r.height();
+            for u in units {
+                // a unit coloured like the trace (tab10's blue is close to the default) would vanish
+                // into it: draw it lighter on the trace (its marks keep the true colour)
+                let c = unit_color(u.color);
+                let near = |a: Color32, b: Color32| (a.r().abs_diff(b.r()) as u32 + a.g().abs_diff(b.g()) as u32 + a.b().abs_diff(b.b()) as u32) < 120;
+                let on_trace = if near(c, trace_color) { c.lerp_to_gamma(Color32::WHITE, 0.6) } else { c };
+                let w = if u.tagged() || self.selected_unit == Some(u.id) { 2.2 } else { 1.5 };
+                for &s in &u.times[u.range(a, b)] {
+                    let ts = s as f64 / fs;
+                    let k0 = xs.partition_point(|&x| x < ts - SPIKE_HALF_S);
+                    let k1 = xs.partition_point(|&x| x <= ts + SPIKE_HALF_S);
+                    if k1 > k0 + 1 {
+                        p.add(egui::Shape::line((k0..k1).map(|k| Pos2::new(tx(xs[k]), sy(ys[k]))).collect(), Stroke::new(w, on_trace)));
+                    }
+                    let x = tx(ts);
+                    p.line_segment([Pos2::new(x, r.top()), Pos2::new(x, r.top() + 6.0)], Stroke::new(w, c));
+                }
+            }
+        } else {
+            let lane = ((r.height() / 3.0) / units.len() as f32).clamp(1.0, 4.0);
+            for (j, u) in units.iter().enumerate() {
+                let c = unit_color(u.color);
+                let y0 = r.top() + j as f32 * lane;
+                for x in spike_columns(&u.times[u.range(a, b)], fs, tx) {
+                    p.line_segment([Pos2::new(x, y0), Pos2::new(x, y0 + lane)], Stroke::new(1.0, c));
+                }
+            }
+        }
+    }
+
+    /// The Units tab: the sorted units of the spike export.
+    fn units_ui(&mut self, ui: &mut egui::Ui) {
+        if self.spike_dirs.len() > 1 {
+            let current = self.spikes.as_ref().map(|s| s.dir.clone());
+            let name = |d: &PathBuf| d.strip_prefix(&self.rec.home).unwrap_or(d).display().to_string();
+            let mut pick = None;
+            egui::ComboBox::from_id_salt("spike_export").selected_text(current.as_ref().map(name).unwrap_or_else(|| "—".into())).show_ui(ui, |ui| {
+                for d in &self.spike_dirs {
+                    if ui.selectable_label(current.as_ref() == Some(d), name(d)).clicked() {
+                        pick = Some(d.clone());
+                    }
+                }
+            });
+            if let Some(d) = pick {
+                self.load_spikes(&d);
+            }
+        }
+        if let Some(e) = &self.spikes_error {
+            ui.label(egui::RichText::new(format!("This spike export couldn't be read:\n{e}")).color(Color32::from_rgb(0xe0, 0x70, 0x60)));
+            return;
+        }
+        let Some(sp) = &self.spikes else { return };
+        let fs = self.rec.fs;
+        ui.label(egui::RichText::new(format!("{} units, {} spikes", sp.units.len(), sp.n_spikes())).color(LABEL)).on_hover_text(sp.dir.display().to_string());
+        let sorter = &sp.manifest["sorter"];
+        ui.label(
+            egui::RichText::new(format!(
+                "{} · {} {}",
+                sp.name(),
+                sorter["name"].as_str().unwrap_or("sorter ?"),
+                sorter["version"].as_str().unwrap_or("")
+            ))
+            .small()
+            .color(MUTED),
+        );
+        if let Some((a, b)) = sp.subset {
+            ui.label(
+                egui::RichText::new(format!("test export: spikes only from {} to {}", fmt_time(a as f64 / fs, None), fmt_time(b as f64 / fs, None)))
+                    .small()
+                    .color(Color32::from_rgb(0xe0, 0xb0, 0x60)),
+            );
+        }
+        ui.checkbox(&mut self.raster, "raster lanes under the chart").on_hover_text("a lane per shown unit under the rows, e.g. to compare with the EMG");
+        ui.separator();
+        let mut select = None;
+        let mut toggle = None;
+        let cols = ["fr", "snr", "pickup_score"];
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            egui::Grid::new("units").spacing([8.0, 4.0]).show(ui, |ui| {
+                for h in ["", "unit", "wire", "class", "rate Hz", "SNR", "pickup"] {
+                    ui.label(egui::RichText::new(h).small().color(MUTED));
+                }
+                ui.end_row();
+                for u in &sp.units {
+                    let c = unit_color(u.color);
+                    let mut shown = !self.hidden_units.contains(&u.id);
+                    if ui.checkbox(&mut shown, "").on_hover_text("show this unit's spikes").changed() {
+                        toggle = Some(u.id);
+                    }
+                    let selected = self.selected_unit == Some(u.id);
+                    let text = |s: String| {
+                        let t = egui::RichText::new(s).color(if u.tagged() { c } else { LABEL });
+                        if u.tagged() { t.strong() } else { t }
+                    };
+                    let mut row = vec![ui.add(egui::Label::new(egui::RichText::new(format!("■ u{}", u.id)).color(c).strong()).sense(Sense::click()))];
+                    row.push(ui.add(egui::Label::new(text(u.wire.clone())).sense(Sense::click())));
+                    row.push(ui.add(egui::Label::new(text(u.class.clone())).sense(Sense::click())));
+                    for k in cols {
+                        row.push(ui.add(egui::Label::new(text(u.get(k).unwrap_or("").to_string())).sense(Sense::click())));
+                    }
+                    let rect = row.iter().map(|r| r.rect).reduce(|a, b| a.union(b)).unwrap();
+                    if selected {
+                        ui.painter().rect_stroke(rect.expand(2.0), 3.0, Stroke::new(1.0, c), egui::StrokeKind::Outside);
+                        if self.list_scroll {
+                            row[0].scroll_to_me(None);
+                        }
+                    }
+                    if row.iter().any(|r| r.clicked()) {
+                        select = Some(u.id);
+                    }
+                    let tip = u.info.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n");
+                    for r in row {
+                        r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{tip}\n\nclick to select; {} + ← / → steps through its spikes", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }));
+                    }
+                    ui.end_row();
+                }
+            });
+            if !sp.laser.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(format!("{} laser windows shaded on the brain rows", sp.laser.len())).small().color(MUTED));
+            }
+        });
+        self.list_scroll = false;
+        if let Some(id) = toggle
+            && !self.hidden_units.remove(&id)
+        {
+            self.hidden_units.insert(id);
+        }
+        if let Some(id) = select {
+            self.selected_unit = if self.selected_unit == Some(id) { None } else { Some(id) };
+        }
+    }
+
+    /// Ctrl/Cmd + arrow with a unit selected: its previous / next spike from the cursor.
+    fn step_spike(&mut self, d: i64) {
+        let (Some(sp), Some(id)) = (&self.spikes, self.selected_unit) else { return };
+        let Some(u) = sp.units.iter().find(|u| u.id == id) else { return };
+        let fs = self.rec.fs;
+        let cur = (self.t * fs).round() as i64;
+        let k = if d > 0 { u.times.partition_point(|&s| s <= cur) } else { u.times.partition_point(|&s| s < cur).wrapping_sub(1) };
+        match u.times.get(k) {
+            Some(&s) => {
+                self.status = format!("u{}: spike {} of {} (sample {s})", u.id, k + 1, u.times.len());
+                self.set_time(s as f64 / fs);
+            }
+            None => self.status = format!("no u{} spike {}", u.id, if d > 0 { "after this" } else { "before this" }),
+        }
+    }
+
+    /// Up / Down in the Units tab: the previous / next unit.
+    fn walk_units(&mut self, d: i64) {
+        let Some(sp) = &self.spikes else { return };
+        if sp.units.is_empty() {
+            return;
+        }
+        let at = self.selected_unit.and_then(|id| sp.units.iter().position(|u| u.id == id));
+        let k = match at {
+            Some(k) => (k as i64 + d).clamp(0, sp.units.len() as i64 - 1) as usize,
+            None if d > 0 => 0,
+            None => sp.units.len() - 1,
+        };
+        self.selected_unit = Some(sp.units[k].id);
+        self.list_scroll = true;
     }
 
     /// The Events tab (the list of marked events arrives with annotation).
@@ -1967,6 +2224,10 @@ impl App {
                 (format!("{cmd} + ← / →"), "previous / next event in time"),
                 ("Delete".into(), "remove the selected event"),
             ]),
+            ("Sorted units", vec![
+                ("↑ / ↓ (Units tab showing)".into(), "previous / next unit"),
+                (format!("{cmd} + ← / →"), "the selected unit's previous / next spike"),
+            ]),
         ];
         let labels: Vec<(String, String, Color32)> = self
             .labels
@@ -2098,7 +2359,11 @@ impl App {
                 self.side_open = true;
             }
             ui.add_space(10.0);
-            for (tab, letter, tip) in [(SideTab::Channels, "C", "Channels"), (SideTab::Events, "E", "Events")] {
+            let mut tabs = vec![(SideTab::Channels, "C", "Channels"), (SideTab::Events, "E", "Events")];
+            if !self.spike_dirs.is_empty() {
+                tabs.push((SideTab::Units, "U", "Units"));
+            }
+            for (tab, letter, tip) in tabs {
                 if ui.selectable_label(self.side_tab == tab, letter).on_hover_text(tip).clicked() {
                     self.side_tab = tab;
                     self.side_open = true;
@@ -2127,7 +2392,11 @@ impl App {
         refs.extend(names.iter().cloned());
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("channels").striped(true).spacing([4.0, 5.0]).show(ui, |ui| {
-                for h in ["", "Show", "Label", "Ch", "Ref", "Mode", "Low Hz", "High Hz", "Notch", "DSP wzrd", "Y range", "Clip"] {
+                let spike_col = self.spikes.is_some();
+                for h in ["", "Show", "Label", "Ch", "Ref", "Mode", "Low Hz", "High Hz", "Notch", "DSP wzrd", "Y range", "Clip", "Spikes"] {
+                    if h == "Spikes" && !spike_col {
+                        continue;
+                    }
                     let l = ui.label(egui::RichText::new(h).small());
                     if h == "DSP wzrd" {
                         l.on_hover_text(
@@ -2202,6 +2471,13 @@ impl App {
                         changed |= *s != before;
                     }
                     changed |= clip_switch(ui, &mut s.clip);
+                    if let Some(sp) = &self.spikes {
+                        if sp.has_wire(&s.ch) {
+                            changed |= ui.checkbox(&mut s.spikes, "").on_hover_text("draw this channel's sorted units on the row").changed();
+                        } else {
+                            ui.label("");
+                        }
+                    }
                     ui.end_row();
                 }
             });
@@ -2257,7 +2533,15 @@ impl App {
             painter.text(rect.center(), Align2::CENTER_CENTER, "no channels shown (tick some in the Channels panel)", FontId::proportional(13.0), MUTED);
             return;
         }
-        let row_h = ((bottom - top) - ROW_GAP * (n as f32 - 1.0)) / n as f32;
+        // raster lanes of the shown units, under the rows (if there is room)
+        let lanes: Vec<usize> = match (&self.spikes, self.raster) {
+            (Some(sp), true) => (0..sp.units.len()).filter(|k| !self.hidden_units.contains(&sp.units[*k].id)).collect(),
+            _ => vec![],
+        };
+        let raster_h = if lanes.is_empty() { 0.0 } else { lanes.len() as f32 * RASTER_LANE_H + 6.0 };
+        let raster_h = if bottom - raster_h > top + 10.0 * n as f32 { raster_h } else { 0.0 };
+        let rows_bottom = bottom - raster_h;
+        let row_h = ((rows_bottom - top) - ROW_GAP * (n as f32 - 1.0)) / n as f32;
         let plot_w = x1 - x0;
         self.plot_px = plot_w * ppp;
         let (t, span) = (self.t, self.span);
@@ -2300,6 +2584,16 @@ impl App {
                 painter.line_segment([Pos2::new(ax - 4.0, y), Pos2::new(ax, y)], Stroke::new(1.0, FG));
                 painter.text(Pos2::new(ax - 6.0, y), Align2::RIGHT_CENTER, fmt_tick(v, step), small.clone(), FG);
             }
+            if let Some(sp) = &self.spikes
+                && sp.brain.contains(&self.rows[i].spec.ch)
+            {
+                let fs = self.rec.fs;
+                let tx = |t: f64| x0 + ((t - t_lo) / span) as f32 * plot_w;
+                for w in sp.laser.iter().filter(|w| (w[1] as f64) / fs > t_lo && (w[0] as f64) / fs < t_hi) {
+                    let (a, b) = (tx(w[0] as f64 / fs).max(x0), tx(w[1] as f64 / fs).min(x1));
+                    painter.rect_filled(Rect::from_x_y_ranges(a..=b.max(a + 1.0), r.y_range()), 0.0, Color32::from_white_alpha(22));
+                }
+            }
             match tr {
                 None => {
                     let msg = if self.rec.is_portable() {
@@ -2340,7 +2634,35 @@ impl App {
                     let outline = (self.layout.outline && !self.video_above()).then_some(self.layout.outline_px);
                     let cb = LineStrip { slot: i, points, color: self.rows[i].color, px: px_for(area, ppp), outline };
                     // the layer's own painter, so the clip can reach past this panel (video, overview)
-                    ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area).add(egui_wgpu::Callback::new_paint_callback(area, cb));
+                    let layer = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area);
+                    layer.add(egui_wgpu::Callback::new_paint_callback(area, cb));
+                    if self.rows[i].spec.spikes {
+                        self.row_spikes(&layer, &self.rows[i].spec.ch, self.rows[i].color, r, (lo, hi), &xs, &ys, (t_lo, t_hi), (x0, plot_w));
+                    }
+                }
+            }
+        }
+        if raster_h > 0.0
+            && let Some(sp) = &self.spikes
+        {
+            let fs = self.rec.fs;
+            let tx = |t: f64| x0 + ((t - t_lo) / span) as f32 * plot_w;
+            let (a, b) = ((t_lo * fs).floor() as i64, (t_hi * fs).ceil() as i64 + 1);
+            for (j, &k) in lanes.iter().enumerate() {
+                let u = &sp.units[k];
+                let y0 = rows_bottom + 6.0 + j as f32 * RASTER_LANE_H;
+                let lane = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y0 + RASTER_LANE_H - 2.0));
+                let c = unit_color(u.color);
+                if self.selected_unit == Some(u.id) {
+                    painter.rect_filled(lane.expand2(Vec2::new(0.0, 1.0)), 0.0, Color32::from_white_alpha(16));
+                }
+                if labels {
+                    let name = format!("u{} {}{}", u.id, u.wire, if u.tagged() { " ★" } else { "" });
+                    painter.text(Pos2::new(x0 - 6.0, lane.center().y), Align2::RIGHT_CENTER, name, FontId::proportional(9.5), c);
+                }
+                let w = if u.tagged() { 2.0 } else { 1.0 };
+                for x in spike_columns(&u.times[u.range(a, b)], fs, tx) {
+                    painter.line_segment([Pos2::new(x, lane.top()), Pos2::new(x, lane.bottom())], Stroke::new(w, c));
                 }
             }
         }
@@ -2941,12 +3263,14 @@ impl App {
             let (id, width) = match self.side_tab {
                 SideTab::Channels => ("channels", 760.0f32),
                 SideTab::Events => ("events", 260.0),
+                SideTab::Units => ("units", 380.0),
             };
             egui::Panel::right(id).resizable(true).default_size(width.min(max_w)).max_size(max_w).show(ui, |ui| {
                 self.sidebar_tabs(ui);
                 match self.side_tab {
                     SideTab::Channels => self.channels_ui(ui),
                     SideTab::Events => self.events_ui(ui),
+                    SideTab::Units => self.units_ui(ui),
                 }
             });
         } else {

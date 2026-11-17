@@ -24,6 +24,10 @@ pub struct Spec {
     /// How far the trace may draw beyond its own row (display only).
     #[serde(default, skip_serializing_if = "Clip::is_row")]
     pub clip: Clip,
+    /// Sorted spikes are drawn on this row, when a spike export has units on its channel
+    /// (display only).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub spikes: bool,
     /// Filter overrides (band, order, notch, plot_fs, …) and anything else in the JSON.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -31,6 +35,10 @@ pub struct Spec {
 
 fn yes() -> bool {
     true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// Where a row's trace is cut off: at its row, at the edges of the chart (all rows), or nowhere
@@ -63,7 +71,7 @@ impl Clip {
 
 impl Spec {
     pub fn new(ch: &str, mode: &str) -> Self {
-        Spec { ch: ch.into(), reference: None, mode: mode.into(), label: None, show: true, color: None, ylim: None, clip: Clip::Row, extra: Map::new() }
+        Spec { ch: ch.into(), reference: None, mode: mode.into(), label: None, show: true, color: None, ylim: None, clip: Clip::Row, spikes: true, extra: Map::new() }
     }
 
     pub fn title(&self) -> String {
@@ -72,7 +80,7 @@ impl Spec {
 
     /// The spec without its display-only fields (what the processed trace depends on).
     pub fn processing(&self) -> Spec {
-        Spec { label: None, show: true, color: None, ylim: None, clip: Clip::Row, ..self.clone() }
+        Spec { label: None, show: true, color: None, ylim: None, clip: Clip::Row, spikes: true, ..self.clone() }
     }
 }
 

@@ -85,7 +85,9 @@ pub struct Portable {
 
 /// Whether `dir` is a portable session.
 pub fn is_session(dir: &Path) -> bool {
-    dir.join(MANIFEST).is_file()
+    // a session's annotations file may be copied back next to the recording along with the
+    // manifest; a folder with the recording itself (structure.oebin) is the recording
+    dir.join(MANIFEST).is_file() && !dir.join("structure.oebin").exists()
 }
 
 /// Read a portable session: its manifest and recording facts.
