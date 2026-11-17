@@ -26,6 +26,9 @@ pub struct Unit {
     pub wire: String,
     pub class: String,
     pub color: [u8; 3],
+    /// Its row in templates.npy: the template_row column, else its place in cluster_info.tsv
+    /// (never its cluster id, as phy would have it).
+    pub template_row: usize,
     /// Spike sample indexes, ascending.
     pub times: Vec<i64>,
     /// Every cluster_info.tsv column, as written (header, value).
@@ -144,6 +147,7 @@ pub fn load(dir: &Path, fs: f64, n_samples: usize, first_sample_number: i64) -> 
             wire: f.get(wi).unwrap_or(&"").trim().to_string(),
             class: col("class").and_then(|i| f.get(i)).unwrap_or(&"").trim().to_string(),
             color,
+            template_row: col("template_row").and_then(|i| f.get(i)).and_then(|s| s.trim().parse().ok()).unwrap_or(units.len()),
             times: vec![],
             info,
         });
@@ -196,6 +200,7 @@ mod tests {
         crate::npy::write_i64(&dir.join("spike_times.npy"), &[100, 200, 250, 900]).unwrap();
         crate::npy::write_i64(&dir.join("spike_clusters.npy"), &[3, 7, 3, 3]).unwrap();
         std::fs::write(dir.join("cluster_info.tsv"), "cluster_id\twire\tclass\tfr\tcolour\n3\tCH1\tTAGGED\t2.5\t#ff0000\n7\tCH2\tcandidate\t1\t\n").unwrap();
+        // (no template_row column: rows follow the table)
         let m = serde_json::json!({
             "syncview_spikes": 1,
             "recording": {"sample_rate": 30000.0, "n_samples": n_samples, "first_sample_number": 5},
@@ -214,6 +219,7 @@ mod tests {
         assert_eq!(s.units.len(), 2);
         assert_eq!((s.units[0].id, s.units[0].times.clone(), s.units[0].color, s.units[0].tagged()), (3, vec![100, 250, 900], [255, 0, 0], true));
         assert_eq!(s.units[1].times, vec![200]);
+        assert_eq!((s.units[0].template_row, s.units[1].template_row), (0, 1));
         assert_eq!(s.units[0].range(200, 901), 1..3);
         assert_eq!(s.brain, vec!["CH1", "CH2"]);
         assert!(s.subset.is_none() && s.laser.is_empty());
