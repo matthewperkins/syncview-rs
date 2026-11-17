@@ -237,6 +237,9 @@ pub struct App {
     /// The recording's first whole-recording filtering is running (the banner explains it; later
     /// rebuilds, after a filter change, show in the status bar and the rows' numbers only).
     first_build: bool,
+    /// When the recording folder was last looked at for spike exports (one may be written while
+    /// the recording is open; its manifest is written last).
+    spikes_scanned: Instant,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -595,6 +598,7 @@ impl App {
             car: crate::refs::CarDef { op: crate::refs::Op::Median, variant: crate::refs::Variant::ExcludeOwn, names: vec![] },
             car_open: false,
             first_build: false,
+            spikes_scanned: Instant::now(),
             builder,
             window_worker,
             specs: vec![],
@@ -3412,6 +3416,24 @@ impl App {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.spikes_scanned.elapsed().as_secs_f64() > 5.0 {
+            self.spikes_scanned = Instant::now();
+            let found = crate::spikes::find(&self.rec.home);
+            if found != self.spike_dirs {
+                self.spike_dirs = found;
+                if self.spikes.is_none()
+                    && let Some(d) = self.spike_dirs.first().cloned()
+                {
+                    self.load_spikes(&d);
+                    if self.car.names.is_empty()
+                        && let Some(sp) = &self.spikes
+                    {
+                        self.car.names = self.car_default(sp);
+                    }
+                }
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
         if self.first_build && self.builder.progress.lock().unwrap().is_none() && self.specs.iter().all(|s| !s.show || self.cache.get(s).is_some()) {
             self.first_build = false;
         }
