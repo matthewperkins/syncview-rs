@@ -43,6 +43,18 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// The full-resolution samples from `before` samples before time `t` to `after` after it
+    /// (None when level 0 isn't there or the stretch runs off either end).
+    pub fn snippet(&self, t: f64, before: usize, after: usize) -> Option<Vec<f32>> {
+        let y = self.y.as_ref()?.slice();
+        let i = ((t - self.t0) / self.dt).round() as i64;
+        let (a, b) = (i - before as i64, i + after as i64);
+        if a < 0 || b as usize > y.len() {
+            return None;
+        }
+        Some((a as usize..b as usize).map(|k| y.get(k)).collect())
+    }
+
     /// In-memory trace (e.g. a window processed on demand), with its pyramid.
     pub fn from_samples(t0: f64, dt: f64, y: Vec<f32>) -> Self {
         let (mut mins, mut maxs) = (vec![], vec![]);

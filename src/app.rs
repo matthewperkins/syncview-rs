@@ -16,6 +16,8 @@ use std::time::Instant;
 
 const RATES: [f64; 10] = [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 100.0, 300.0];
 const TIME_BASES: [f64; 16] = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0];
+mod waves;
+
 const WINDOW_MAX_S: f64 = 180.0; // on-demand (uncached) processing only for views up to this span
 pub const BG: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
 pub const FG: Color32 = Color32::from_rgb(0xc3, 0xc2, 0xb7);
@@ -240,6 +242,13 @@ pub struct App {
     /// When the recording folder was last looked at for spike exports (one may be written while
     /// the recording is open; its manifest is written last).
     spikes_scanned: Instant,
+    /// The spike loupe (Alt held over a row) and the waveform grid's pins (waves.rs).
+    loupe: Option<waves::Loupe>,
+    pins: Vec<waves::Pin>,
+    pin_seq: usize,
+    waves_open: bool,
+    /// The grid overlays every spike of the selected unit in the chart's view.
+    waves_all: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -258,6 +267,13 @@ const RASTER_LANE_H: f32 = 10.0;
 
 fn unit_color(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// A unit's colour drawn over a trace: lighter when it is close to the trace's own colour
+/// (tab10's blue is close to the default), so its spikes don't vanish into it.
+fn on_trace(unit: Color32, trace: Color32) -> Color32 {
+    let d = unit.r().abs_diff(trace.r()) as u32 + unit.g().abs_diff(trace.g()) as u32 + unit.b().abs_diff(trace.b()) as u32;
+    if d < 120 { unit.lerp_to_gamma(Color32::WHITE, 0.6) } else { unit }
 }
 
 /// Pixel columns (x) holding at least one of `times` (samples), for drawing many spikes as ticks.
@@ -599,6 +615,11 @@ impl App {
             car_open: false,
             first_build: false,
             spikes_scanned: Instant::now(),
+            loupe: None,
+            pins: vec![],
+            pin_seq: 0,
+            waves_open: false,
+            waves_all: false,
             builder,
             window_worker,
             specs: vec![],
@@ -1441,6 +1462,14 @@ impl App {
             {
                 self.layout.hide_ylabels = !self.layout.hide_ylabels;
             }
+            if (self.spikes.is_some() || !self.pins.is_empty())
+                && ui
+                    .add(egui::Button::selectable(self.waves_open, "Waveforms"))
+                    .on_hover_text("the waveform grid: pinned spikes over their units' templates (hold Alt / Option over a row for the loupe)")
+                    .clicked()
+            {
+                self.waves_open = !self.waves_open;
+            }
             if ui
                 .add(egui::Button::selectable(self.car_open, "CAR"))
                 .on_hover_text("the common reference: which wires build it, and which rows subtract it")
@@ -1848,8 +1877,7 @@ impl App {
                 // a unit coloured like the trace (tab10's blue is close to the default) would vanish
                 // into it: draw it lighter on the trace (its marks keep the true colour)
                 let c = unit_color(u.color);
-                let near = |a: Color32, b: Color32| (a.r().abs_diff(b.r()) as u32 + a.g().abs_diff(b.g()) as u32 + a.b().abs_diff(b.b()) as u32) < 120;
-                let on_trace = if near(c, trace_color) { c.lerp_to_gamma(Color32::WHITE, 0.6) } else { c };
+                let on_trace = on_trace(c, trace_color);
                 let w = if u.tagged() || self.selected_unit == Some(u.id) { 2.2 } else { 1.5 };
                 for &s in &u.times[u.range(a, b)] {
                     let ts = s as f64 / fs;
@@ -2397,6 +2425,9 @@ impl App {
             ("Sorted units", vec![
                 ("↑ / ↓ (Units tab showing)".into(), "previous / next unit"),
                 (format!("{cmd} + ← / →"), "the selected unit's previous / next spike"),
+                (if cfg!(target_os = "macos") { "hold Option over a row" } else { "hold Alt over a row" }.into(), "the loupe: ±3 ms at full rate"),
+                ("… + click".into(), "pin the spike under it in the waveform grid"),
+                ("… + right-click".into(), "pin that moment on every wire"),
             ]),
         ];
         let labels: Vec<(String, String, Color32)> = self
@@ -2836,8 +2867,7 @@ impl App {
                     let layer = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area);
                     layer.add(egui_wgpu::Callback::new_paint_callback(area, cb));
                     // (not on a row showing the CAR itself: its channel is only a stand-in)
-                    let car_itself = self.rows[i].spec.reference.as_deref().and_then(crate::refs::CarDef::parse).is_some_and(|d| d.variant == crate::refs::Variant::Only);
-                    if self.rows[i].spec.spikes && !car_itself {
+                    if self.rows[i].spec.spikes && !self.is_car_itself(i) {
                         self.row_spikes(&layer, &self.rows[i].spec.ch, self.rows[i].color, r, (lo, hi), &xs, &ys, (t_lo, t_hi), (x0, plot_w));
                     }
                 }
@@ -2943,7 +2973,12 @@ impl App {
         if pointer_in {
             self.wheel(ui.ctx(), hover_row, plot_w);
         }
-        if resp.dragged_by(egui::PointerButton::Primary) {
+        // Alt held: the loupe (its clicks pin spikes; drags don't pan)
+        let alt = self.loupe_input(ui.ctx(), hover_pos, hover_row, (x0, plot_w));
+        if self.loupe.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) && !alt {
             self.set_time(self.t - resp.drag_delta().x as f64 * self.span / plot_w as f64);
         }
         if resp.double_clicked() {
@@ -3531,6 +3566,8 @@ impl App {
         self.export_ui(&ctx);
         self.portable_ui(&ctx);
         self.car_ui(&ctx);
+        self.waves_ui(&ctx);
+        self.loupe_ui(&ctx);
         if self.playing {
             ctx.request_repaint();
         }

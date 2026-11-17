@@ -28,7 +28,6 @@ pub struct Unit {
     pub color: [u8; 3],
     /// Its row in templates.npy: the template_row column, else its place in cluster_info.tsv
     /// (never its cluster id, as phy would have it).
-    #[allow(dead_code)] // (the waveform box will read templates)
     pub template_row: usize,
     /// Spike sample indexes, ascending.
     pub times: Vec<i64>,
@@ -61,6 +60,45 @@ pub struct Spikes {
     pub subset: Option<(i64, i64)>,
     /// The brain wires (spikes and references come from these; EMG wires never go into a reference).
     pub brain: Vec<String>,
+    /// Mean waveforms (and their SD) per unit and channel, if the export has them.
+    pub templates: Option<Templates>,
+}
+
+/// templates.npy (+ templates_std.npy): (units, samples, channels), µV; a unit's row is its
+/// `template_row`, the channels are the manifest's `channel_map_names`.
+pub struct Templates {
+    pub mean: Vec<f32>,
+    pub sd: Option<Vec<f32>>,
+    pub n_samples: usize,
+    pub n_before: usize,
+    pub channels: Vec<String>,
+}
+
+impl Templates {
+    /// A unit's mean (and SD) on a wire.
+    pub fn get(&self, unit: &Unit, wire: &str) -> Option<(Vec<f32>, Option<Vec<f32>>)> {
+        let c = self.channels.iter().position(|n| n == wire)?;
+        let nc = self.channels.len();
+        let pick = |v: &[f32]| -> Option<Vec<f32>> {
+            let base = unit.template_row * self.n_samples * nc;
+            (base + self.n_samples * nc <= v.len()).then(|| (0..self.n_samples).map(|s| v[base + s * nc + c]).collect())
+        };
+        Some((pick(&self.mean)?, self.sd.as_deref().and_then(pick)))
+    }
+}
+
+fn load_templates(dir: &Path, m: &Value) -> Option<Templates> {
+    let mean = crate::npy::load_f32(&dir.join("templates.npy")).ok()?.as_slice().to_vec();
+    let sd = crate::npy::load_f32(&dir.join("templates_std.npy")).ok().map(|a| a.as_slice().to_vec());
+    let channels: Vec<String> = m["channel_map_names"].as_array()?.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let n_samples = m["templates"]["n_samples"].as_u64()? as usize;
+    let n_before = m["templates"]["n_before"].as_u64().unwrap_or(n_samples as u64 / 3) as usize;
+    if channels.is_empty() || n_samples == 0 || mean.len() % (n_samples * channels.len()) != 0 {
+        eprintln!("syncview: {}: templates.npy doesn't fit the manifest's channels and n_samples; not shown", dir.display());
+        return None;
+    }
+    let sd = sd.filter(|v| v.len() == mean.len());
+    Some(Templates { mean, sd, n_samples, n_before, channels })
 }
 
 impl Spikes {
@@ -179,7 +217,8 @@ pub fn load(dir: &Path, fs: f64, n_samples: usize, first_sample_number: i64) -> 
         .as_array()
         .map(|w| w.iter().filter(|w| w["kind"] == "brain").filter_map(|w| w["name"].as_str().map(String::from)).collect())
         .unwrap_or_else(|| units.iter().map(|u| u.wire.clone()).collect());
-    Ok(Spikes { dir: dir.to_path_buf(), manifest: m, units, laser, subset, brain })
+    let templates = load_templates(dir, &m);
+    Ok(Spikes { dir: dir.to_path_buf(), manifest: m, units, laser, subset, brain, templates })
 }
 
 fn parse_hex(s: &str) -> Option<[u8; 3]> {

@@ -337,6 +337,21 @@ it, checks that it belongs to the recording, and adds a **Units** tab:
   with the EMG.
 - Laser windows from the export are shaded on the brain rows.
 
+### The loupe and the waveform grid
+
+- **Hold Alt** (**Option** on a Mac) over a row: the loupe shows ±3 ms around the pointer at the
+  full sample rate, with spikes in their units' colours and the nearest spike's unit template
+  drawn faintly over it.
+- **Click** while it shows: pins the nearest spike in its own wire's panel of the **Waveforms**
+  grid, over its unit's template (± SD). **Right-click**: pins that moment on every wire, to see
+  whether the others moved too (a neuron is local; pickup shows everywhere).
+- The grid has a panel per brain wire, all on one scale. Click a pin's label to remove it; **Clear**
+  removes them all. **All spikes of uN in view** overlays every spike of the unit selected in the
+  Units tab within the chart's view (at most 400), faintly, over its template: scroll from a
+  masseter burst to rest and watch whether they still fit.
+- Snippets come from each wire's row as it is drawn (raw, CAR or sorter), so they match the
+  traces; a wire with no row has nothing to show.
+
 ### References: CAR and the sorter's data
 
 A row's **Ref** can be another channel (subtracted before filtering, as before), **CAR**, or
