@@ -85,6 +85,10 @@ struct Cli {
     /// and its icon), then exit
     #[arg(long)]
     install_desktop: bool,
+    /// macOS: put this build into syncview.app in /Applications (or ~/Applications), so Spotlight
+    /// and the Dock run it, then exit; run again after each update (DIR: make the app there instead)
+    #[arg(long, value_name = "DIR", num_args = 0..=1)]
+    install_app: Option<Option<PathBuf>>,
     /// (testing) save a screenshot (PPM) after SECONDS and quit: --screenshot out.ppm --screenshot-after 5
     #[arg(long, hide = true)]
     screenshot: Option<PathBuf>,
@@ -174,6 +178,9 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     attach_console();
     let cli = Cli::parse();
+    if let Some(d) = cli.install_app {
+        return desktop::install_app(d);
+    }
     if cli.install_desktop {
         return desktop::install();
     }

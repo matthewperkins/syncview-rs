@@ -116,6 +116,11 @@ That builds and installs the `syncview` command into `~/.cargo/bin` (add it to y
 shell doesn't find it). The first build takes about 5–10 minutes, most of it compiling FFmpeg. To
 update, run the same command again.
 
+On a Mac, `syncview --install-app` then puts that build into `/Applications/syncview.app` (or
+`~/Applications` if `/Applications` isn't writable), with its icon and an ad-hoc signature, as the
+release zip has it, so Spotlight and the Dock start it. Run it again after each update: the app
+carries its own copy of the program, so updating the command alone leaves the app behind.
+
 On Linux the same command works; x86-64 also needs `nasm` (e.g. `sudo pacman -S nasm`). Then
 `syncview --install-desktop` adds it to your application launcher, with its icon (it writes
 `~/.local/share/applications/syncview.desktop`; run it again if the program moves).
@@ -190,6 +195,7 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 | `--cache FOLDER` | `$SYNCVIEW_RS_CACHE`, else `~/.cache/syncview-rs` (Linux), `~/Library/Caches/syncview-rs` (macOS) | filtered traces |
 | `--time S`, `--time-base S`, `--play` | | initial position, view width, start playing |
 | `--install-desktop` | | Linux: add syncview to the application launcher |
+| `--install-app [DIR]` | `/Applications/syncview.app` | macOS: put this build into syncview.app (run again after each update) |
 | `--export-portable DIR` | | filter, then write a [portable session](#portable-sessions-annotate-away-from-the-recording) into the new folder DIR and exit |
 | `--portable-detail N`, `--portable-videos` | `1` | its detail (1 fine, 2 medium, 3 coarse) and whether to copy the videos into it |
 
