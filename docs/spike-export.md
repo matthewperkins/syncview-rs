@@ -109,4 +109,5 @@ PC features, whitened data, per-spike snippets, or the phy curation UI.
   `start_sample`–`end_sample`; it may carry its own short copy of the preprocessed data, described by
   `preprocessed.start_sample` and `preprocessed.n_samples`.
 - The preprocessed file may be in raw ADC counts: `preprocessed.gain_to_uV` converts it.
-- `templates.npy` rows are assumed to follow `cluster_info.tsv`'s row order (to be confirmed; not used yet).
+- Row k of `templates.npy` and `templates_std.npy` is row k of `cluster_info.tsv` (confirmed), not the
+  cluster id as in standard phy. If the manifest's `templates` block lists `cluster_ids`, that list wins.
