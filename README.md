@@ -337,6 +337,25 @@ it, checks that it belongs to the recording, and adds a **Units** tab:
   with the EMG.
 - Laser windows from the export are shaded on the brain rows.
 
+### References: CAR and the sorter's data
+
+A row's **Ref** can be another channel (subtracted before filtering, as before), **CAR**, or
+**sorter**:
+
+- **CAR** subtracts a common reference. Each member wire is filtered as the row is, then the
+  per-sample median (or mean) of the members is taken, as SpikeInterface's `common_reference` does
+  after its bandpass. The **CAR** button in the toolbar opens a window to tick which wires build it
+  and which rows subtract it, choose median or mean, and leave each row's own wire out (or not).
+  **Match the sorter** copies the sorter's wires and settings from the export. EMG wires (from the
+  export's wire list) can't be ticked. **Add the reference as a row** shows the reference itself: a
+  unit whose spikes line up with its swings is picking up something common to all the wires.
+- **sorter** shows the sorter's own preprocessed data (its filter, reference and laser cleanup),
+  read from the file the export names, without further filtering. Rows it doesn't cover (a test
+  export's short file) read as 0.
+
+Each reference is cached like any other trace. CAR rows with the same members and filter are
+filtered together, so the members are read and filtered once for all of them.
+
 ## Export a clip
 
 **Export → Video clip…** (in the toolbar, once a video is synced) saves an MP4 like Python syncview's

@@ -18,6 +18,7 @@ mod npy;
 mod oe;
 mod portable;
 mod preset;
+mod refs;
 mod shell;
 mod spikes;
 mod splash;

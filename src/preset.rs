@@ -229,7 +229,9 @@ pub fn from_recording(rec: &Recording) -> Preset {
 /// Drop rows (and the overview) that refer to channels or modes this recording doesn't have.
 pub fn check(mut p: Preset, rec: &Recording) -> (Preset, Vec<String>) {
     let bad = |s: &Spec| -> Option<String> {
-        let missing: Vec<&str> = [Some(&s.ch), s.reference.as_ref()]
+        // a CAR or the sorter's data (refs.rs) is checked by refs::parse; a plain ref is a channel
+        let special = s.reference.as_deref().is_some_and(|r| r.starts_with("car:") || r.starts_with("sorter:"));
+        let missing: Vec<&str> = [Some(&s.ch), s.reference.as_ref().filter(|_| !special)]
             .into_iter()
             .flatten()
             .filter(|c| !c.is_empty() && rec.ch(c).is_none())
@@ -237,6 +239,9 @@ pub fn check(mut p: Preset, rec: &Recording) -> (Preset, Vec<String>) {
             .collect();
         if !missing.is_empty() {
             return Some(format!("channel {} not in this recording", missing.join(", ")));
+        }
+        if special && let Err(e) = crate::refs::parse(rec, s) {
+            return Some(format!("{e:#}"));
         }
         if !MODES.contains(&s.mode.as_str()) {
             return Some(format!("unknown mode {:?}", s.mode));

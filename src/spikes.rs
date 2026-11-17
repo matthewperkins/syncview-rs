@@ -28,6 +28,7 @@ pub struct Unit {
     pub color: [u8; 3],
     /// Its row in templates.npy: the template_row column, else its place in cluster_info.tsv
     /// (never its cluster id, as phy would have it).
+    #[allow(dead_code)] // (the waveform box will read templates)
     pub template_row: usize,
     /// Spike sample indexes, ascending.
     pub times: Vec<i64>,

@@ -231,6 +231,12 @@ pub struct App {
     selected_unit: Option<i64>,
     /// Raster lanes of the shown units under the chart rows.
     raster: bool,
+    /// The common reference rows with Ref "CAR" use (refs.rs), and whether its window is open.
+    car: crate::refs::CarDef,
+    car_open: bool,
+    /// The recording's first whole-recording filtering is running (the banner explains it; later
+    /// rebuilds, after a filter change, show in the status bar and the rows' numbers only).
+    first_build: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -586,6 +592,9 @@ impl App {
             hidden_units: Default::default(),
             selected_unit: None,
             raster: false,
+            car: crate::refs::CarDef { op: crate::refs::Op::Median, variant: crate::refs::Variant::ExcludeOwn, names: vec![] },
+            car_open: false,
+            first_build: false,
             builder,
             window_worker,
             specs: vec![],
@@ -655,6 +664,12 @@ impl App {
         }
         if let Some(d) = app.spike_dirs.first().cloned() {
             app.load_spikes(&d);
+        }
+        app.first_build = app.specs.iter().any(|s| s.show && app.cache.get(s).is_none());
+        if let Some(def) = app.specs.iter().filter_map(|s| s.reference.as_deref().and_then(crate::refs::CarDef::parse)).next() {
+            app.car = crate::refs::CarDef { variant: if def.variant == crate::refs::Variant::IncludeOwn { def.variant } else { crate::refs::Variant::ExcludeOwn }, ..def };
+        } else if let Some(sp) = &app.spikes {
+            app.car.names = app.car_default(sp);
         }
         app
     }
@@ -1422,6 +1437,13 @@ impl App {
             {
                 self.layout.hide_ylabels = !self.layout.hide_ylabels;
             }
+            if ui
+                .add(egui::Button::selectable(self.car_open, "CAR"))
+                .on_hover_text("the common reference: which wires build it, and which rows subtract it")
+                .clicked()
+            {
+                self.car_open = !self.car_open;
+            }
             ui.separator();
             if ui.button("?").on_hover_text("keys and mouse (?)").clicked() {
                 self.help = !self.help;
@@ -1475,7 +1497,7 @@ impl App {
 
     /// Work done only the first time a recording or video is opened is under way.
     fn first_open_busy(&self) -> bool {
-        self.builder.progress.lock().unwrap().is_some() || self.cams.iter().any(|c| c.opened.is_none() && c.dec.indexing().is_some())
+        (self.first_build && self.builder.progress.lock().unwrap().is_some()) || self.cams.iter().any(|c| c.opened.is_none() && c.dec.indexing().is_some())
     }
 
     /// The first-open banner: what is being read, how far along, and that it happens once.
@@ -1491,7 +1513,7 @@ impl App {
                 .color(MUTED),
         );
         let w = (ui.available_width() * 0.35).clamp(160.0, 360.0);
-        if let Some(f) = *self.builder.progress.lock().unwrap() {
+        if let Some(f) = (*self.builder.progress.lock().unwrap()).filter(|_| self.first_build) {
             let bytes = self.rec.n_samples() as f64 * self.rec.ch_names.len() as f64 * 2.0;
             ui.horizontal(|ui| {
                 ui.add(egui::ProgressBar::new(f as f32).desired_width(w).text(format!("{:.0} %", f * 100.0)));
@@ -1637,6 +1659,150 @@ impl App {
             });
         });
         ui.separator();
+    }
+
+    /// The default common reference: the export's good brain wires (never EMG).
+    fn car_default(&self, sp: &crate::spikes::Spikes) -> Vec<String> {
+        let good: Vec<String> = sp.manifest["wires"]
+            .as_array()
+            .map(|w| w.iter().filter(|w| w["kind"] == "brain" && w["good"] != false).filter_map(|w| w["name"].as_str().map(String::from)).collect())
+            .unwrap_or_else(|| sp.brain.clone());
+        good.into_iter().filter(|n| self.rec.ch(n).is_some()).collect()
+    }
+
+    /// The sorter's preprocessed data, if the spike export has it: (the file, the Ref text).
+    fn sorter_source(&self) -> Option<(std::sync::Arc<crate::refs::SorterFile>, String)> {
+        let sp = self.spikes.as_ref()?;
+        let f = crate::refs::SorterFile::open(&sp.dir).ok()?;
+        Some((f, crate::refs::sorter_text(&sp.dir)))
+    }
+
+    /// Rows referenced to the CAR follow its definition (members, median/mean, own wire in or out).
+    fn apply_car(&mut self) {
+        use crate::refs::{CarDef, Variant};
+        for s in &mut self.specs {
+            if let Some(d) = s.reference.as_deref().and_then(CarDef::parse) {
+                let variant = if d.variant == Variant::Only { Variant::Only } else { self.car.variant };
+                s.reference = (!self.car.names.is_empty()).then(|| CarDef { variant, ..self.car.clone() }.text());
+                if variant == Variant::Only {
+                    s.ch = self.car.names.first().cloned().unwrap_or(s.ch.clone());
+                    s.label = Some(CarDef { variant, ..self.car.clone() }.short());
+                }
+            }
+        }
+        self.sync_edits();
+        self.set_specs();
+    }
+
+    /// The CAR window: which wires build the reference, which rows subtract it.
+    fn car_ui(&mut self, ctx: &egui::Context) {
+        use crate::refs::{CarDef, Op, Variant};
+        if !self.car_open {
+            return;
+        }
+        let mut open = true;
+        let before = self.car.clone();
+        let mut subtract: Option<(String, bool)> = None;
+        let mut add_row = false;
+        let emg: Vec<String> = self
+            .spikes
+            .as_ref()
+            .and_then(|sp| sp.manifest["wires"].as_array().map(|w| w.iter().filter(|w| w["kind"] != "brain").filter_map(|w| w["name"].as_str().map(String::from)).collect()))
+            .unwrap_or_default();
+        let sorter_ref = self.spikes.as_ref().map(|sp| sp.manifest["preprocessing"]["reference"].clone()).filter(|r| r.is_object());
+        egui::Window::new("Common reference (CAR)").open(&mut open).collapsible(false).resizable(false).default_width(330.0).show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Each wire is filtered as its row is, then the per-sample median (or mean) of the ticked wires is subtracted, as SpikeInterface's common reference does.")
+                    .small()
+                    .color(MUTED),
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.car.op, Op::Median, "median");
+                ui.radio_value(&mut self.car.op, Op::Mean, "mean");
+                let mut excl = self.car.variant == Variant::ExcludeOwn;
+                if ui.checkbox(&mut excl, "leave each row's own wire out").changed() {
+                    self.car.variant = if excl { Variant::ExcludeOwn } else { Variant::IncludeOwn };
+                }
+            });
+            ui.horizontal(|ui| {
+                if let Some(r) = &sorter_ref
+                    && ui.button("Match the sorter").on_hover_text("the sorter's wires and median/mean (from the spike export)").clicked()
+                {
+                    let names: Vec<String> = r["wires"].as_array().map(|w| w.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                    self.car.names = names.into_iter().filter(|n| self.rec.ch(n).is_some() && !emg.contains(n)).collect();
+                    self.car.op = if r["operator"] == "mean" { Op::Mean } else { Op::Median };
+                    self.car.variant = if r["includes_own_wire"] == false { Variant::ExcludeOwn } else { Variant::IncludeOwn };
+                }
+                if ui.add_enabled(!self.car.names.is_empty(), egui::Button::new("Add the reference as a row")).on_hover_text("a row showing the reference itself: pickup shows as spikes that line up with its swings").clicked() {
+                    add_row = true;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                egui::Grid::new("car_grid").spacing([14.0, 3.0]).show(ui, |ui| {
+                    ui.label(egui::RichText::new("wire").small().color(MUTED));
+                    ui.label(egui::RichText::new("builds it").small().color(MUTED));
+                    ui.label(egui::RichText::new("rows subtract it").small().color(MUTED));
+                    ui.end_row();
+                    for (i, name) in self.rec.ch_names.iter().enumerate() {
+                        if self.rec.ch_types[i].is_some_and(|t| t != 0) {
+                            continue; // ADC / AUX
+                        }
+                        let is_emg = emg.contains(name);
+                        ui.label(egui::RichText::new(name).color(if is_emg { MUTED } else { LABEL }));
+                        let mut member = self.car.names.contains(name);
+                        if ui
+                            .add_enabled(!is_emg, egui::Checkbox::without_text(&mut member))
+                            .on_disabled_hover_text("an EMG wire: muscle activity would leak into every brain row")
+                            .changed()
+                        {
+                            if member {
+                                self.car.names.push(name.clone());
+                                // keep the recording's channel order (the reference text is a cache key)
+                                let order = &self.rec.ch_names;
+                                self.car.names.sort_by_key(|n| order.iter().position(|o| o == n));
+                            } else {
+                                self.car.names.retain(|n| n != name);
+                            }
+                        }
+                        let rows: Vec<&Spec> = self.specs.iter().filter(|s| s.ch == *name && s.mode == "hilo").collect();
+                        let on = rows.iter().any(|s| s.reference.as_deref().and_then(CarDef::parse).is_some_and(|d| d.variant != Variant::Only));
+                        let mut sub = on;
+                        if ui
+                            .add_enabled(!rows.is_empty() && !self.car.names.is_empty(), egui::Checkbox::without_text(&mut sub))
+                            .on_disabled_hover_text("no full-rate (hilo) row shows this wire")
+                            .changed()
+                        {
+                            subtract = Some((name.clone(), sub));
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        });
+        self.car_open = open;
+        let mut changed = self.car != before;
+        if let Some((name, on)) = subtract {
+            let text = self.car.text();
+            for s in self.specs.iter_mut().filter(|s| s.ch == name && s.mode == "hilo") {
+                s.reference = on.then(|| text.clone());
+            }
+            changed = true;
+        }
+        if add_row {
+            let def = CarDef { variant: Variant::Only, ..self.car.clone() };
+            let mut s = Spec::new(&self.car.names[0], "hilo");
+            if let Some(b) = self.specs.iter().find(|s| s.reference.as_deref().is_some_and(|r| r.starts_with("car:"))) {
+                s.extra = b.extra.clone(); // filtered as the CAR rows are
+            }
+            s.reference = Some(def.text());
+            s.label = Some(def.short());
+            self.specs.push(s);
+            changed = true;
+        }
+        if changed {
+            self.apply_car();
+        }
     }
 
     /// Read a spike export (one of `spike_dirs`); a problem is shown in the Units tab.
@@ -2388,6 +2554,9 @@ impl App {
             });
         });
         let names = self.rec.ch_names.clone();
+        let building = *self.builder.progress.lock().unwrap();
+        let car_text = if self.car.names.is_empty() { String::new() } else { self.car.text() };
+        let sorter = self.sorter_source();
         let mut refs = vec!["—".to_string()];
         refs.extend(names.iter().cloned());
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -2418,7 +2587,19 @@ impl App {
                 }
                 ui.end_row();
                 for i in 0..self.specs.len() {
-                    if ui.selectable_label(self.selected == Some(i), format!("{:>2}", i + 1)).clicked() {
+                    // a row being filtered shows it in its number cell (same size, so nothing moves)
+                    let pending = building.is_some() && self.specs[i].show && self.cache.get(&self.specs[i]).is_none();
+                    let num = if pending { egui::RichText::new(format!("{:>2}", i + 1)).color(Color32::from_rgb(0xe0, 0xb0, 0x60)) } else { egui::RichText::new(format!("{:>2}", i + 1)) };
+                    let cell = ui.selectable_label(self.selected == Some(i), num);
+                    let cell = if pending {
+                        let r = cell.rect;
+                        let f = building.unwrap_or(0.0) as f32;
+                        ui.painter().rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 2.0), Pos2::new(r.left() + r.width() * f, r.bottom())), 0.0, Color32::from_rgb(0xe0, 0xb0, 0x60));
+                        cell.on_hover_text(format!("filtering the whole recording for this row: {:.0} %\n(it is drawn from on-the-fly filtering meanwhile; edits restart the filtering)", f * 100.0))
+                    } else {
+                        cell
+                    };
+                    if cell.clicked() {
                         self.selected = if self.selected == Some(i) { None } else { Some(i) };
                     }
                     let s = &mut self.specs[i];
@@ -2435,12 +2616,26 @@ impl App {
                         }
                     });
                     let mut r = s.reference.clone().unwrap_or_else(|| "—".into());
-                    egui::ComboBox::from_id_salt(("ref", i)).width(54.0).selected_text(&r).show_ui(ui, |ui| {
-                        for n in &refs {
-                            if ui.selectable_value(&mut r, n.clone(), n).changed() {
+                    let mut options: Vec<(String, String)> = vec![("—".into(), "—".into())];
+                    if !car_text.is_empty() && s.mode == "hilo" {
+                        options.push((car_text.clone(), "CAR".into()));
+                    }
+                    if let Some(t) = sorter.as_ref().filter(|(f, _)| f.column(&s.ch).is_some()).map(|(_, t)| t) {
+                        options.push((t.clone(), "sorter".into()));
+                    }
+                    options.extend(refs.iter().skip(1).map(|n| (n.clone(), n.clone())));
+                    egui::ComboBox::from_id_salt(("ref", i)).width(54.0).selected_text(crate::refs::short(&r)).show_ui(ui, |ui| {
+                        for (v, shown) in &options {
+                            if ui.selectable_value(&mut r, v.clone(), shown).changed() {
                                 changed = true;
                             }
                         }
+                    })
+                    .response
+                    .on_hover_text(match crate::refs::short(&r).as_str() {
+                        "sorter" => "the sorter's own preprocessed data (its filter, reference and laser cleanup); Low/High Hz and Notch don't apply",
+                        "CAR" => "minus the common reference (set it up with the CAR button in the toolbar)",
+                        _ => "subtract another channel (before filtering), the common reference (CAR), or show the sorter's data",
                     });
                     s.reference = (r != "—").then_some(r);
                     let before = s.mode.clone();
@@ -2636,7 +2831,9 @@ impl App {
                     // the layer's own painter, so the clip can reach past this panel (video, overview)
                     let layer = ui.ctx().layer_painter(ui.layer_id()).with_clip_rect(area);
                     layer.add(egui_wgpu::Callback::new_paint_callback(area, cb));
-                    if self.rows[i].spec.spikes {
+                    // (not on a row showing the CAR itself: its channel is only a stand-in)
+                    let car_itself = self.rows[i].spec.reference.as_deref().and_then(crate::refs::CarDef::parse).is_some_and(|d| d.variant == crate::refs::Variant::Only);
+                    if self.rows[i].spec.spikes && !car_itself {
                         self.row_spikes(&layer, &self.rows[i].spec.ch, self.rows[i].color, r, (lo, hi), &xs, &ys, (t_lo, t_hi), (x0, plot_w));
                     }
                 }
@@ -3215,6 +3412,9 @@ impl App {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.first_build && self.builder.progress.lock().unwrap().is_none() && self.specs.iter().all(|s| !s.show || self.cache.get(s).is_some()) {
+            self.first_build = false;
+        }
         if let Some((last, times)) = &mut self.fps {
             times.push(ctx.input(|i| i.unstable_dt) as f64 * 1000.0);
             if last.elapsed().as_secs_f64() >= 1.0 {
@@ -3252,9 +3452,6 @@ impl App {
         if !self.labels.is_empty() {
             egui::Panel::top("labels").show(ui, |ui| self.label_strip(ui));
         }
-        if self.first_open_busy() {
-            egui::Panel::top("first_open").frame(egui::Frame::NONE.fill(Color32::from_rgb(0x1c, 0x1f, 0x2c)).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| self.first_open_ui(ui));
-        }
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         let overview = egui::Panel::bottom("overview").exact_size(110.0).frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| self.overview_ui(ui)).response.rect;
         let max_w = (ui.available_width() * 0.45).max(120.0);
@@ -3275,6 +3472,11 @@ impl App {
             });
         } else {
             egui::Panel::right("sidebar_rail").exact_size(30.0).resizable(false).show(ui, |ui| self.sidebar_rail(ui));
+        }
+        // the first-open banner sits over the chart only (after the sidebar), so the channel
+        // table doesn't move under the pointer when it comes and goes
+        if self.first_open_busy() {
+            egui::Panel::top("first_open").frame(egui::Frame::NONE.fill(Color32::from_rgb(0x1c, 0x1f, 0x2c)).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| self.first_open_ui(ui));
         }
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(BG).inner_margin(4.0)).show(ui, |ui| {
             let central = ui.max_rect();
@@ -3306,6 +3508,7 @@ impl App {
         }
         self.export_ui(&ctx);
         self.portable_ui(&ctx);
+        self.car_ui(&ctx);
         if self.playing {
             ctx.request_repaint();
         }

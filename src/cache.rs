@@ -10,7 +10,7 @@
 //! A portable session's traces (portable.rs) may leave out the finest levels: meta.json's
 //! "first_level" (absent: 0) is the finest one present; below it the view draws steps.
 
-use crate::filters::{out_step, pad_samples, process, process_from, spec_key};
+use crate::filters::{out_step, pad_samples, spec_key};
 use crate::npy::{self, F32Array, SampleSlice, Samples};
 use crate::oe::Recording;
 use crate::preset::Spec;
@@ -293,25 +293,48 @@ impl TraceCache {
             }
             // the channels the specs need, each read once per chunk
             let mut chans: Vec<usize> = vec![];
-            let mut wanted: Vec<(usize, Option<usize>)> = vec![];
+            let mut wanted: Vec<(usize, crate::refs::Ref)> = vec![];
             for s in &specs {
                 let ch = rec.ch(&s.ch).with_context(|| format!("unknown channel {}", s.ch))?;
-                let r = s.reference.as_deref().filter(|r| !r.is_empty()).and_then(|r| rec.ch(r));
-                for c in std::iter::once(ch).chain(r) {
+                let r = crate::refs::parse(rec, s)?;
+                let own = if matches!(r, crate::refs::Ref::Sorter(_)) { vec![] } else { vec![ch] };
+                for c in own.into_iter().chain(r.channels()) {
                     if !chans.contains(&c) {
                         chans.push(c);
                     }
                 }
-                let col = |c: usize| chans.iter().position(|x| *x == c).unwrap();
-                wanted.push((col(ch), r.map(col)));
+                wanted.push((ch, r));
+            }
+            // channel -> its column in each chunk read
+            let mut col_of = vec![usize::MAX; chans.iter().max().map_or(0, |m| m + 1)];
+            for (k, c) in chans.iter().enumerate() {
+                col_of[*c] = k;
             }
             let bv: Vec<f64> = chans.iter().map(|c| rec.bit_volts(*c)).collect();
+            // CAR rows with the same members and filtering are one task, so the members are
+            // filtered once for all of them; every other spec is a task of its own
+            let mut groups: Vec<Vec<usize>> = vec![];
+            let mut by_car: HashMap<String, usize> = HashMap::new();
+            for (j, (_, r)) in wanted.iter().enumerate() {
+                if let crate::refs::Ref::Car(c) = r {
+                    let mut p = specs[j].processing();
+                    p.ch.clear();
+                    p.reference = None;
+                    let key = format!("{}|{}", c.def.members_text(), self.key(&p));
+                    if let Some(&g) = by_car.get(&key) {
+                        groups[g].push(j);
+                        continue;
+                    }
+                    by_car.insert(key, groups.len());
+                }
+                groups.push(vec![j]);
+            }
             // Each (chunk, spec) pair is its own task, so a chunk's quick specs don't wait for its
             // slow ones and the next chunk is read while this one is filtered.
             let maps: Vec<Mutex<npy::F16MapMut>> = maps.into_iter().map(Mutex::new).collect();
             let n_chunks = n.div_ceil(chunk);
             let block_len = (BLOCK_S * fs) as usize;
-            let n_tasks = n_chunks * specs.len();
+            let n_tasks = n_chunks * groups.len();
             let done = AtomicUsize::new(0);
             let error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
             let in_flight = (Mutex::new(vec![0usize; n_chunks]), Condvar::new()); // unfinished tasks per chunk
@@ -335,7 +358,7 @@ impl TraceCache {
                         while i >= 2 && left[i - 2] > 0 {
                             left = cv.wait(left).unwrap();
                         }
-                        left[i] = specs.len();
+                        left[i] = groups.len();
                     }
                     if stopped() {
                         break;
@@ -346,43 +369,70 @@ impl TraceCache {
                     let tr = std::time::Instant::now();
                     let cols = Arc::new(rec.raw_columns(&chans, first, len));
                     *t_read.lock().unwrap() += tr.elapsed().as_secs_f64();
-                    for (j, s) in specs.iter().enumerate() {
-                        let (cols, bv, maps, steps, wanted) = (cols.clone(), &bv, &maps, &steps, &wanted);
+                    for js in &groups {
+                        let (cols, bv, maps, steps, wanted, col_of, specs) = (cols.clone(), &bv, &maps, &steps, &wanted, &col_of, &specs);
                         let (done, error, in_flight, stopped, t_mode) = (&done, &error, &in_flight, &stopped, &t_mode);
+                        let s0 = &specs[js[0]];
                         scope.spawn_fifo(move |_| {
                             if !stopped() {
-                                let (st, (a, r)) = (steps[j], wanted[j]);
+                                // recorded values of channel c for absolute rows [row, row + out.len())
+                                let raw = |c: usize, row: usize, out: &mut [f64]| {
+                                    let k = col_of[c];
+                                    let u = &cols[k][row - first..row - first + out.len()];
+                                    out.iter_mut().zip(u).for_each(|(o, v)| *o = *v as f64 * bv[k]);
+                                };
+                                // keep the output rows [b0, b1) of a block's result
+                                let write = |j: usize, y: &[f64], a0: i64, b0: usize, b1: usize| {
+                                    let st = steps[j];
+                                    let k0 = ((b0 as i64 - a0) / st as i64).max(0) as usize;
+                                    let k1 = (k0 + (b1 - b0).div_ceil(st)).min(y.len());
+                                    let o0 = b0 / st;
+                                    let mut map = maps[j].lock().unwrap();
+                                    let out = map.as_mut_slice();
+                                    for (k, v) in y[k0..k1].iter().enumerate() {
+                                        if o0 + k < out.len() {
+                                            out[o0 + k] = npy::to_f16(*v);
+                                        }
+                                    }
+                                };
                                 let run = || -> Result<()> {
                                     // Full-rate EMG is filtered in short blocks (each with the
                                     // mode's own padding) that stay in the CPU's cache, instead of
                                     // streaming a 10-minute chunk through memory several times.
-                                    let block = if s.mode == "hilo" { block_len } else { c1 - c0 };
-                                    let spad = if s.mode == "hilo" { pad_samples(s, fs) as i64 } else { pad };
+                                    let block = if s0.mode == "hilo" { block_len } else { c1 - c0 };
+                                    let spad = if s0.mode == "hilo" { pad_samples(s0, fs) as i64 } else { pad };
                                     let mut b0 = c0;
                                     while b0 < c1 {
                                         let b1 = (b0 + block).min(c1);
                                         let (bf, bl) = rec.clip(b0 as i64 - spad, b1 as i64 + spad);
-                                        // x[i] of this block, in the same arithmetic as Recording::trace
-                                        let fill = |i: usize, out: &mut [f64]| {
-                                            let u = &cols[a][bf - first + i..bf - first + i + out.len()];
-                                            match r {
-                                                None => out.iter_mut().zip(u).for_each(|(o, v)| *o = *v as f64 * bv[a]),
-                                                Some(b) => {
-                                                    let w = &cols[b][bf - first + i..bf - first + i + out.len()];
-                                                    out.iter_mut().zip(u.iter().zip(w)).for_each(|(o, (p, q))| *o = *p as f64 * bv[a] - *q as f64 * bv[b]);
+                                        match &wanted[js[0]].1 {
+                                            crate::refs::Ref::Car(car) => {
+                                                let (ys, a0, _) = crate::refs::members(fs, s0, car, bf, bl, &raw)?;
+                                                // each row's own filtered wire (already among the members, usually)
+                                                let owns = js
+                                                    .iter()
+                                                    .map(|&j| {
+                                                        let crate::refs::Ref::Car(cj) = &wanted[j].1 else { unreachable!() };
+                                                        crate::refs::own_output(fs, &specs[j], cj, wanted[j].0, &ys, bf, bl, &raw)
+                                                    })
+                                                    .collect::<Result<Vec<_>>>()?;
+                                                let rows: Vec<_> = js
+                                                    .iter()
+                                                    .zip(&owns)
+                                                    .map(|(&j, own)| {
+                                                        let crate::refs::Ref::Car(cj) = &wanted[j].1 else { unreachable!() };
+                                                        (cj.def.variant, own.as_ref().map(|(y, k)| (y.as_slice(), *k)))
+                                                    })
+                                                    .collect();
+                                                for (&j, y) in js.iter().zip(crate::refs::combine_group(car.def.op, &ys, &rows)) {
+                                                    write(j, &y, a0, b0, b1);
                                                 }
                                             }
-                                        };
-                                        let (y, a0, st2) = process_from(bl, &fill, bf as i64, fs, s)?;
-                                        debug_assert_eq!(st2 as usize, st);
-                                        let k0 = ((b0 as i64 - a0) / st as i64).max(0) as usize;
-                                        let k1 = (k0 + (b1 - b0).div_ceil(st)).min(y.len());
-                                        let o0 = b0 / st;
-                                        let mut map = maps[j].lock().unwrap();
-                                        let out = map.as_mut_slice();
-                                        for (k, v) in y[k0..k1].iter().enumerate() {
-                                            if o0 + k < out.len() {
-                                                out[o0 + k] = npy::to_f16(*v);
+                                            r => {
+                                                let j = js[0];
+                                                let (y, a0, st2) = crate::refs::process(fs, s0, r, wanted[j].0, bf, bl, &raw)?;
+                                                debug_assert_eq!(st2 as usize, steps[j]);
+                                                write(j, &y, a0, b0, b1);
                                             }
                                         }
                                         b0 = b1;
@@ -391,7 +441,7 @@ impl TraceCache {
                                 };
                                 let tt = std::time::Instant::now();
                                 let res = run();
-                                *t_mode.lock().unwrap().entry(s.mode.clone()).or_default() += tt.elapsed().as_secs_f64();
+                                *t_mode.lock().unwrap().entry(s0.mode.clone()).or_default() += tt.elapsed().as_secs_f64();
                                 if let Err(e) = res {
                                     error.lock().unwrap().get_or_insert(e);
                                 }
@@ -615,9 +665,7 @@ impl WindowWorker {
                         }
                         let pad = pad_samples(s, fs) as i64;
                         let (first, len) = rec.clip(i0 - pad, i1 + pad);
-                        let Some(ch) = rec.ch(&s.ch) else { return };
-                        let r = s.reference.as_deref().filter(|r| !r.is_empty()).and_then(|r| rec.ch(r));
-                        match process(rec.trace(ch, r, first, len), first as i64, fs, s) {
+                        match crate::refs::process_window(rec, s, first, len) {
                             Ok((y, a, step)) => {
                                 let k0 = ((i0 - a).max(0) as usize).div_ceil(step as usize);
                                 let k1 = (((i1 - a).max(0) as usize).div_ceil(step as usize)).min(y.len());

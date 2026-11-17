@@ -3,7 +3,7 @@
 //! Python syncview's clips).
 
 use crate::cache::{Trace, TraceCache};
-use crate::filters::{pad_samples, process};
+use crate::filters::pad_samples;
 use crate::oe::Recording;
 use crate::preset::Spec;
 use crate::video::FrameReader;
@@ -248,9 +248,7 @@ fn row_trace(rec: &Recording, cache: &TraceCache, spec: &Spec, t_lo: f64, t_hi: 
     let i1 = (t_hi.min(rec.duration()) * fs) as i64;
     let pad = pad_samples(spec, fs) as i64;
     let (first, len) = rec.clip(i0 - pad, i1 + pad);
-    let ch = rec.ch(&spec.ch).with_context(|| format!("no channel {}", spec.ch))?;
-    let r = spec.reference.as_deref().filter(|r| !r.is_empty()).and_then(|r| rec.ch(r));
-    let (y, a, step) = process(rec.trace(ch, r, first, len), first as i64, fs, spec)?;
+    let (y, a, step) = crate::refs::process_window(rec, spec, first, len)?;
     let ys: Vec<f32> = y.iter().map(|v| *v as f32).collect();
     Ok(Arc::new(Trace::from_samples(a as f64 / fs, step as f64 / fs, ys)))
 }

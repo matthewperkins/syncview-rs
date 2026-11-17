@@ -274,14 +274,6 @@ impl Recording {
     pub fn bit_volts(&self, ch: usize) -> f64 {
         self.cont().bit_volts(ch)
     }
-
-    /// Physical-unit trace of `ch` (minus `reference`) for rows [first, first + n).
-    pub fn trace(&self, ch: usize, reference: Option<usize>, first: usize, n: usize) -> Vec<f64> {
-        match reference {
-            None => self.cont().read(ch, first..first + n),
-            Some(r) => self.cont().read_referenced(ch, r, first..first + n),
-        }
-    }
 }
 
 pub struct SyncInfo {
