@@ -234,7 +234,11 @@ impl TraceCache {
         // a portable session's traces are in the session (and nothing can be added to them)
         let root = if rec.is_portable() { rec.home.join("traces") } else { root };
         std::fs::create_dir_all(&root).with_context(|| format!("creating cache folder {}", root.display()))?;
-        let rec_dir = rec.rec_dir.to_string_lossy().into_owned();
+        let rec_dir = match rec.dimna() {
+            // still recording (or interrupted): its traces are for this many samples only
+            Some(d) if !d.complete => format!("{}#{}", rec.rec_dir.display(), d.n_samples),
+            _ => rec.rec_dir.to_string_lossy().into_owned(),
+        };
         Ok(TraceCache { rec, root, rec_dir, open: Mutex::new(HashMap::new()), last_build: Mutex::new(None) })
     }
 

@@ -47,21 +47,40 @@ pub fn videos(dir: &Path, recs: &[PathBuf]) -> Vec<PathBuf> {
     let mut all = vec![];
     walk(dir, 6, &mut all);
     // (videos inside a recording's folder aren't its videos; inside a portable session's they are)
-    all.into_iter().filter(|p| is_video(p) && !recs.iter().any(|r| !crate::portable::is_session(r) && p.starts_with(r))).collect()
+    let mut v: Vec<PathBuf> = all.into_iter().filter(|p| is_video(p) && !recs.iter().any(|r| !crate::portable::is_session(r) && p.starts_with(r))).collect();
+    // the same video seen through a link (Dimna's `current`) counts once
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
+    v
 }
 
-/// Open Ephys recordings (folders with structure.oebin, .nwb files) and portable sessions under
-/// `dir`, or `dir` itself if it is a portable session.
+/// Open Ephys recordings (folders with structure.oebin, .nwb files), Dimna recordings and
+/// portable sessions under `dir`, or `dir` itself if it is a portable session or a Dimna
+/// recording or session.
 pub fn find_recordings(dir: &Path) -> Vec<PathBuf> {
     if crate::portable::is_session(dir) {
         return vec![dir.to_path_buf()];
     }
+    if let Some(d) = crate::dimna::locate(dir) {
+        return vec![d];
+    }
     let mut v = openephys::find_recordings(dir, 6);
     let mut all = vec![];
-    walk(dir, 3, &mut all);
-    v.extend(all.into_iter().filter(|p| p.is_dir() && crate::portable::is_session(p)));
+    walk(dir, 4, &mut all);
+    let mut dimna: Vec<PathBuf> = all.iter().filter(|p| p.is_dir() && crate::dimna::is_recording(p)).filter_map(|p| crate::dimna::locate(p)).collect();
+    dimna.sort();
+    dimna.dedup(); // (`current` links to a session listed under its own name)
+    v.extend(dimna);
+    let depth = |p: &Path| p.strip_prefix(dir).map_or(0, |r| r.components().count());
+    v.extend(all.into_iter().filter(|p| depth(p) <= 4 && p.is_dir() && crate::portable::is_session(p)));
     v.sort();
     v
+}
+
+/// The folder to look for videos and presets in: a Dimna recording's session folder when `dir`
+/// is the recording (`<session>/ephys`), else `dir`.
+pub fn search_dir(dir: &Path) -> PathBuf {
+    crate::dimna::locate(dir).and_then(|d| crate::dimna::session_of(&d)).unwrap_or_else(|| dir.to_path_buf())
 }
 
 /// Preset JSON files at the top of `dir`.
@@ -86,16 +105,19 @@ pub fn pick_preset(presets: &[PathBuf]) -> Option<PathBuf> {
 /// an error naming them, except presets, where `preset.json` wins. `want_video` / `want_preset`
 /// false skip those searches.
 pub fn resolve(dir: &Path, want_video: bool, want_preset: bool) -> Result<Found> {
+    // a Dimna recording's meta.toml stands for its folder
+    let dir = &crate::dimna::locate(dir).filter(|_| dir.is_file()).unwrap_or_else(|| dir.to_path_buf());
     if !dir.is_dir() {
         bail!("{} is not a folder", dir.display());
     }
     let recs = find_recordings(dir);
     let rec = match recs.as_slice() {
-        [] => bail!("no Open Ephys recording (a folder containing structure.oebin, or an NWB file) in {}", dir.display()),
+        [] => bail!("no recording (an Open Ephys folder containing structure.oebin, an NWB file, or a Dimna recording) in {}", dir.display()),
         [r] => r.clone(),
         _ => bail!("{} holds several recordings; pick one with --rec:{}", dir.display(), list(&recs, dir)),
     };
     let mut found = Found { rec, ..Default::default() };
+    let dir = &search_dir(dir);
     if want_video {
         let vids = videos(dir, &recs);
         found.video = match vids.as_slice() {

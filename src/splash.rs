@@ -215,6 +215,26 @@ fn describe_recording(path: &Path, line: i64) -> String {
             Err(e) => format!("can't open: {e}"),
         };
     }
+    if crate::dimna::is_recording(path) {
+        return match crate::oe::Recording::open(path, None) {
+            Ok(r) => {
+                let d = r.dimna().expect("a Dimna recording");
+                let mut parts = vec!["Dimna".to_string(), fmt_time(r.duration(), Some(3600.0)), format!("{} ch @ {} kHz", r.ch_names.len(), r.fs / 1000.0)];
+                if let Some(c) = &d.created {
+                    parts.push(format!("started {}", c.get(..16).unwrap_or(c).replace('T', " ")));
+                }
+                parts.push(match r.rising_edges(line).len() {
+                    0 => format!("no triggers on line {line}"),
+                    n => format!("{n} triggers on line {line}"),
+                });
+                if !d.complete {
+                    parts.push("interrupted".into());
+                }
+                parts.join("  ·  ")
+            }
+            Err(e) => format!("can't open: {e}"),
+        };
+    }
     let rec = match openephys::Recording::open(path) {
         Ok(r) => r,
         Err(e) => return format!("can't open: {e}"),
@@ -310,7 +330,7 @@ impl Splash {
         }
         let recs: Vec<&PathBuf> = paths
             .iter()
-            .filter(|p| p.is_dir() || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("nwb")) || p.ends_with("structure.oebin"))
+            .filter(|p| p.is_dir() || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("nwb")) || p.ends_with("structure.oebin") || p.ends_with(crate::dimna::META))
             .collect();
         let Some(first) = recs.first() else {
             if video_dropped && self.rec.is_none() {
@@ -324,8 +344,10 @@ impl Splash {
         if recs.len() > 1 {
             self.note(format!("Several folders were dropped; using {}.", first.display()));
         }
-        let dir = if first.ends_with("structure.oebin") { first.parent().unwrap_or(first).to_path_buf() } else { (*first).clone() };
+        let dir = if first.ends_with("structure.oebin") || first.ends_with(crate::dimna::META) { first.parent().unwrap_or(first).to_path_buf() } else { (*first).clone() };
         let found = folder::find_recordings(&dir);
+        // a Dimna recording's videos and preset are in its session folder
+        let dir = folder::search_dir(&dir);
         if dir.is_dir()
             && let Some(p) = folder::pick_preset(&folder::presets(&dir))
         {
@@ -333,7 +355,7 @@ impl Splash {
         }
         let vids = if video_dropped || !dir.is_dir() { vec![] } else { folder::videos(&dir, &found) };
         match found.as_slice() {
-            [] => self.error(format!("No Open Ephys recording in {}: looked for folders with structure.oebin, and .nwb files.", dir.display())),
+            [] => self.error(format!("No recording in {}: looked for Open Ephys folders (structure.oebin), .nwb files and Dimna recordings (meta.toml).", dir.display())),
             [one] => {
                 self.rec = Some(one.clone());
                 self.offer_videos(&dir, vids);

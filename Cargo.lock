@@ -2739,6 +2739,7 @@ dependencies = [
  "serde_json",
  "sha1_smol",
  "tiny-skia",
+ "toml",
  "windows-sys 0.61.2",
  "winresource",
 ]

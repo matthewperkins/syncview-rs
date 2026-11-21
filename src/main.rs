@@ -9,6 +9,7 @@ mod app;
 mod cache;
 mod clip;
 mod demo;
+mod dimna;
 mod desktop;
 mod dialog;
 mod filters;
@@ -47,7 +48,8 @@ struct Cli {
     /// holds several recordings or videos, the start page lists them to pick from.
     #[arg(value_name = "FOLDER", conflicts_with_all = ["rec", "demo"])]
     folder: Option<PathBuf>,
-    /// Open Ephys recording folder (…/experimentN/recordingM, containing structure.oebin)
+    /// recording: an Open Ephys recording folder (…/experimentN/recordingM, containing
+    /// structure.oebin), an .nwb file, or a Dimna recording (its folder, meta.toml or session folder)
     #[arg(long)]
     rec: Option<PathBuf>,
     /// try syncview on synthetic data: writes a 5-minute recording, a matching video and a preset

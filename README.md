@@ -173,7 +173,7 @@ syncview /path/to/folder          # finds the recording, videos and preset insid
 ### From the command line
 
 A folder works as on the start page: syncview searches it for Open Ephys recordings (folders
-containing `structure.oebin`, or `.nwb` files), videos (`.mp4`, `.mov`, `.avi`, `.mkv`) and a
+containing `structure.oebin`, or `.nwb` files), [Dimna recordings](#dimna-recordings), videos (`.mp4`, `.mov`, `.avi`, `.mkv`) and a
 preset JSON at its top level (if there are several, the one named `preset.json`). With one recording
 and at most one video it opens them straight away; otherwise the start page asks. In Terminal you
 can type `syncview ` and drag the folder in from Finder. To skip the search, name the files:
@@ -187,7 +187,7 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 | option | default | |
 |---|---|---|
 | `FOLDER` | | a folder to search for the recording, videos and preset (above) |
-| `--rec FOLDER` | none (start page) | Open Ephys recording folder (contains `structure.oebin`) or `.nwb` file |
+| `--rec FOLDER` | none (start page) | Open Ephys recording folder (contains `structure.oebin`), `.nwb` file, or Dimna recording |
 | `--video FILE` | none | video recorded during this recording; repeat for several cameras (up to 4) |
 | `--preset FILE.json` | built from the recording | same JSON as Python syncview |
 | `--stream NAME` | `acquisition_board`, else the first stream | Open Ephys continuous stream |
@@ -198,6 +198,29 @@ syncview --rec "/path/to/Record Node 101/experiment1/recording1" \
 | `--install-app [DIR]` | `/Applications/syncview.app` | macOS: put this build into syncview.app (run again after each update) |
 | `--export-portable DIR` | | filter, then write a [portable session](#portable-sessions-annotate-away-from-the-recording) into the new folder DIR and exit |
 | `--portable-detail N`, `--portable-videos` | `1` | its detail (1 fine, 2 medium, 3 coarse) and whether to copy the videos into it |
+
+### Dimna recordings
+
+syncview also opens recordings made by Dimna (its own format: `samples.i16`, `index.bin`, the TTL
+files, `events.tsv` and `meta.toml`), and everything works on them as on Open Ephys recordings:
+filters, references, the cache, video sync, annotations, portable sessions, spikes. Open any of
+
+- the session folder (`…/2026-11-21_05-34-59/`, holding `ephys/` and `video/`): its videos are
+  found in `video/`;
+- the recording folder (`ephys/`) or its `meta.toml` (videos and a preset are still looked for in
+  the session folder);
+- `~/dimna-recordings/current`: the link is followed to the session it points at now, so later
+  recordings don't take over its annotations and cache;
+- `~/dimna-recordings` itself: the start page lists the sessions.
+
+`syncview_annotations.csv` goes into the session folder, beside `ephys/` and `video/` (into the
+recording folder for a recording made without the session layout). TTL line *k* is bit *k − 1* of
+the input word, as in Open Ephys (`--trigger-line`, default 1).
+
+Only the samples that `index.bin` covers are read. A recording without `[final]` in `meta.toml`
+(interrupted, or still recording) opens with a warning and shows what is on disk; reopen it to see
+more. Lost samples (gaps in the index) are handled as dropped samples in Open Ephys: the rows are
+joined, and a warning says that sync near them may be off.
 
 ## The viewer
 
@@ -293,7 +316,7 @@ starting within 100 ms) and the mean onset and offset differences over the audit
 
 ### Files
 
-- **`syncview_annotations.csv`** in the recording folder, saved a second after each change: one row
+- **`syncview_annotations.csv`** in the recording folder (a Dimna recording's session folder), saved a second after each change: one row
   per event, with times in seconds and sample indexes from the recording's first sample (as
   Kilosort counts), so they line up with sorted spikes. Comment lines at the top record the version,
   sample rate, Open Ephys first sample number and labels (`pandas.read_csv(path, comment="#")`).

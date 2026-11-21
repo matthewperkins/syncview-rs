@@ -2,7 +2,7 @@
 //! camera TTL lines, and video-frame <-> sample synchronisation. Reading is done by the
 //! `openephys` crate; this keeps the handful of things the viewer needs in one place.
 //!
-//! A recording can also be a portable session (portable.rs): the same facts read from a small
+//! A recording can also be a Dimna recording (dimna.rs), read the same way, or a portable session (portable.rs): the same facts read from a small
 //! folder, for viewing and annotating its cached traces without the recording itself.
 
 use anyhow::Result;
@@ -27,6 +27,7 @@ pub struct Recording {
 
 enum Source {
     OpenEphys { rec: Box<openephys::Recording>, stream: usize },
+    Dimna { d: Box<crate::dimna::Dimna>, ttl: BTreeMap<u16, Vec<i64>> },
     Portable(crate::portable::Portable),
 }
 
@@ -45,6 +46,31 @@ impl Recording {
                 units: r.channels.iter().map(|c| c.unit.clone()).collect(),
                 ch_types: r.channels.iter().map(|c| c.type_code).collect(),
                 src: Source::Portable(p),
+            });
+        }
+        if let Some(dir) = crate::dimna::locate(rec_dir) {
+            let d = crate::dimna::Dimna::open(&dir)?;
+            if !d.complete {
+                eprintln!("syncview: warning: {} has no [final] in meta.toml: the recording was interrupted, or is still going (showing what is on disk now).", dir.display());
+            }
+            if d.tail_bytes > 0 {
+                eprintln!("syncview: {} bytes past the last index record in samples.i16 are left out (not yet indexed, or cut off by a crash).", d.tail_bytes);
+            }
+            if !d.is_contiguous() {
+                eprintln!("syncview: warning: samples were lost during this recording (gaps in index.bin) - sync near them may be off.");
+            }
+            let ttl = d.rising_rows();
+            if ttl.is_empty() {
+                eprintln!("syncview: warning: no TTL changes in this recording - video sync is impossible.");
+            }
+            return Ok(Self {
+                rec_dir: dir.clone(),
+                home: crate::dimna::session_of(&dir).unwrap_or(dir),
+                fs: d.fs,
+                ch_names: d.names.clone(),
+                units: d.units.clone(),
+                ch_types: d.type_codes(),
+                src: Source::Dimna { d: Box::new(d), ttl },
             });
         }
         let rec = openephys::Recording::open(rec_dir)?;
@@ -77,18 +103,35 @@ impl Recording {
         matches!(self.src, Source::Portable(_))
     }
 
-    /// The Open Ephys recording (not for a portable session: callers check is_portable first).
+    /// The Dimna recording, if this is one.
+    pub fn dimna(&self) -> Option<&crate::dimna::Dimna> {
+        match &self.src {
+            Source::Dimna { d, .. } => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The Open Ephys recording (callers have handled the other kinds first).
     fn oe(&self) -> &openephys::Recording {
         match &self.src {
             Source::OpenEphys { rec, .. } => rec,
-            Source::Portable(_) => panic!("a portable session has no raw data"),
+            _ => panic!("not an Open Ephys recording"),
         }
     }
 
     fn cont(&self) -> &Continuous {
         match &self.src {
             Source::OpenEphys { rec, stream } => &rec.continuous()[*stream],
-            Source::Portable(_) => panic!("a portable session has no raw data"),
+            _ => panic!("not an Open Ephys recording"),
+        }
+    }
+
+    /// Rising-edge rows per TTL line, for the kinds that keep them as rows.
+    fn row_ttl(&self) -> Option<&BTreeMap<u16, Vec<i64>>> {
+        match &self.src {
+            Source::Portable(p) => Some(&p.ttl),
+            Source::Dimna { ttl, .. } => Some(ttl),
+            Source::OpenEphys { .. } => None,
         }
     }
 
@@ -118,6 +161,7 @@ impl Recording {
     pub fn n_samples(&self) -> usize {
         match &self.src {
             Source::Portable(p) => p.n_samples,
+            Source::Dimna { d, .. } => d.n_samples,
             _ => self.cont().n_samples(),
         }
     }
@@ -125,6 +169,7 @@ impl Recording {
     pub fn duration(&self) -> f64 {
         match &self.src {
             Source::Portable(p) => p.n_samples as f64 / self.fs,
+            Source::Dimna { d, .. } => d.n_samples as f64 / self.fs,
             _ => self.cont().duration(),
         }
     }
@@ -133,6 +178,7 @@ impl Recording {
     pub fn first_sample_number(&self) -> i64 {
         match &self.src {
             Source::Portable(p) => p.first_sample_number,
+            Source::Dimna { d, .. } => d.first_sample,
             _ => self.cont().first_sample_number().unwrap_or(0),
         }
     }
@@ -141,21 +187,22 @@ impl Recording {
     pub fn is_contiguous(&self) -> bool {
         match &self.src {
             Source::Portable(p) => p.contiguous,
+            Source::Dimna { d, .. } => d.is_contiguous(),
             _ => self.cont().is_contiguous(),
         }
     }
 
     pub fn ch(&self, name: &str) -> Option<usize> {
         match &self.src {
-            Source::Portable(_) => self.ch_names.iter().position(|n| n == name),
-            _ => self.cont().channel_index(name),
+            Source::OpenEphys { .. } => self.cont().channel_index(name),
+            _ => self.ch_names.iter().position(|n| n == name),
         }
     }
 
     /// Rows of the rising edges on `line`.
     pub fn rising_edges(&self, line: i64) -> Vec<i64> {
-        if let Source::Portable(p) = &self.src {
-            return u16::try_from(line).ok().and_then(|l| p.ttl.get(&l).cloned()).unwrap_or_default();
+        if let Some(ttl) = self.row_ttl() {
+            return u16::try_from(line).ok().and_then(|l| ttl.get(&l).cloned()).unwrap_or_default();
         }
         match (self.ttl(line), u16::try_from(line)) {
             (Some(t), Ok(l)) => t.rising(l).into_iter().map(|sn| self.row_of(sn)).collect(),
@@ -165,8 +212,8 @@ impl Recording {
 
     /// Rows of the rising edges on every TTL line of the stream (for a portable session).
     pub fn ttl_rising_rows(&self) -> BTreeMap<u16, Vec<i64>> {
-        if let Source::Portable(p) = &self.src {
-            return p.ttl.clone();
+        if let Some(ttl) = self.row_ttl() {
+            return ttl.clone();
         }
         let mut lines: Vec<u16> = self.oe().ttl_for(self.cont()).flat_map(|t| t.lines().into_keys()).collect();
         lines.sort_unstable();
@@ -192,8 +239,9 @@ impl Recording {
     /// whole-session build does, through the memory map and with ordinary reads, twice each.
     pub fn bench_read(&self, chans: &[usize], chunk: usize) {
         let n = self.n_samples();
-        let gb = (n * self.cont().n_channels() * 2) as f64 / 1e9;
-        println!("reading {} of {} channels, {:.2} GB of continuous.dat, in {} chunks, on {} threads", chans.len(), self.cont().n_channels(), gb, n.div_ceil(chunk), rayon::current_num_threads());
+        let nc = self.ch_names.len();
+        let gb = (n * nc * 2) as f64 / 1e9;
+        println!("reading {} of {nc} channels, {gb:.2} GB of samples, in {} chunks, on {} threads", chans.len(), n.div_ceil(chunk), rayon::current_num_threads());
         for (name, plain) in [("memory map", false), ("ordinary reads", true), ("memory map", false), ("ordinary reads", true)] {
             let t = std::time::Instant::now();
             let mut c0 = 0;
@@ -209,8 +257,15 @@ impl Recording {
 
     fn raw_columns_by(&self, chans: &[usize], first: usize, n: usize, plain_reads: bool) -> Vec<Vec<i16>> {
         use rayon::prelude::*;
-        let c = self.cont();
-        let nc = c.n_channels();
+        // the interleaved int16 file, its channel count, and whether it may be longer than the
+        // rows read (a Dimna recording's unindexed tail); NWB: none, read through the crate
+        let (path, nc, tail_ok) = match &self.src {
+            Source::Dimna { d, .. } => (d.samples_path(), d.n_channels, true),
+            _ => {
+                let c = self.cont();
+                (c.dir().join("continuous.dat"), c.n_channels(), false)
+            }
+        };
         let mut cols: Vec<Vec<i16>> = chans.iter().map(|_| vec![0; n]).collect();
         // split the rows between threads; each fills its own piece of every column, in place
         let part = n.div_ceil(rayon::current_num_threads().max(1)).max(65_536);
@@ -224,10 +279,11 @@ impl Recording {
         // buffer that stays in the CPU's cache): through the memory map every page costs a page
         // fault, which on macOS made reading take ~2x longer than all the filtering. On Linux the
         // two are about equally fast. NWB recordings, and any read error, use the map.
-        let dat = std::fs::File::open(c.dir().join("continuous.dat"))
+        let want = (self.n_samples() * nc * 2) as u64;
+        let dat = std::fs::File::open(&path)
             .ok()
-            .filter(|_| plain_reads)
-            .filter(|f| f.metadata().is_ok_and(|m| m.len() == (c.n_samples() * nc * 2) as u64));
+            .filter(|_| plain_reads || tail_ok)
+            .filter(|f| f.metadata().is_ok_and(|m| m.len() == want || tail_ok && m.len() > want));
         pieces.into_par_iter().enumerate().for_each(|(p, mut outs)| {
             let a = first + p * part;
             let b = (a + part).min(first + n);
@@ -262,8 +318,11 @@ impl Recording {
                     return;
                 }
             }
+            if tail_ok {
+                return; // Dimna: a failed read leaves zeros
+            }
             let mut i = 0;
-            for blk in c.blocks(a..b) {
+            for blk in self.cont().blocks(a..b) {
                 gather(&blk, i);
                 i += blk.len() / nc;
             }
@@ -272,6 +331,9 @@ impl Recording {
     }
 
     pub fn bit_volts(&self, ch: usize) -> f64 {
+        if let Source::Dimna { d, .. } = &self.src {
+            return d.bit_volts[ch];
+        }
         self.cont().bit_volts(ch)
     }
 }
@@ -287,8 +349,8 @@ pub struct SyncInfo {
 /// Err when alignment is impossible (no / too few triggers).
 pub fn check_sync(rec: &Recording, n_frames: usize, line: i64, video_duration: Option<f64>) -> Result<SyncInfo, String> {
     let l = u16::try_from(line).map_err(|_| format!("bad trigger line {line}"))?;
-    if let Source::Portable(p) = &rec.src {
-        return check_sync_rows(p, rec.fs, n_frames, l, video_duration);
+    if let Some(ttl) = rec.row_ttl() {
+        return check_sync_rows(ttl, rec.n_samples(), rec.is_contiguous(), rec.fs, n_frames, l, video_duration);
     }
     let Some(ttl) = rec.ttl(line) else {
         return Err(format!("No TTL events in this recording's stream, so the video can't be synced (trigger line {line})."));
@@ -305,12 +367,12 @@ pub fn check_sync(rec: &Recording, n_frames: usize, line: i64, video_duration: O
     })
 }
 
-/// check_sync for a portable session: openephys::align_frames' rules and messages, on the rising
-/// edges' rows as the session stores them.
-fn check_sync_rows(p: &crate::portable::Portable, fs: f64, n_frames: usize, line: u16, video_duration: Option<f64>) -> Result<SyncInfo, String> {
+/// check_sync for a portable session or a Dimna recording: openephys::align_frames' rules and
+/// messages, on the rising edges' rows.
+fn check_sync_rows(ttl: &BTreeMap<u16, Vec<i64>>, n_samples: usize, contiguous: bool, fs: f64, n_frames: usize, line: u16, video_duration: Option<f64>) -> Result<SyncInfo, String> {
     let empty = vec![];
-    let edges = p.ttl.get(&line).unwrap_or(&empty);
-    let others: Vec<String> = p.ttl.iter().filter(|(l, e)| **l != line && !e.is_empty()).map(|(l, e)| format!("line {l}: {}", e.len())).collect();
+    let edges = ttl.get(&line).unwrap_or(&empty);
+    let others: Vec<String> = ttl.iter().filter(|(l, e)| **l != line && !e.is_empty()).map(|(l, e)| format!("line {l}: {}", e.len())).collect();
     let others = if others.is_empty() { "none".to_string() } else { others.join(", ") };
     if edges.is_empty() {
         return Err(format!("No triggers on TTL line {line}. Rising edges on other lines: {others}. Pick the camera trigger line with --trigger-line."));
@@ -320,7 +382,7 @@ fn check_sync_rows(p: &crate::portable::Portable, fs: f64, n_frames: usize, line
     }
     if edges.len() < n_frames {
         let hint: Vec<String> =
-            p.ttl.iter().filter(|(l, e)| **l != line && e.len() >= n_frames && e.len() <= n_frames + 2).map(|(l, _)| l.to_string()).collect();
+            ttl.iter().filter(|(l, e)| **l != line && e.len() >= n_frames && e.len() <= n_frames + 2).map(|(l, _)| l.to_string()).collect();
         return Err(format!(
             "Fewer triggers ({}) on line {line} than video frames ({n_frames}): wrong recording/video pair or trigger line?{}",
             edges.len(),
@@ -353,10 +415,10 @@ fn check_sync_rows(p: &crate::portable::Portable, fs: f64, n_frames: usize, line
     {
         issues.push(format!("Video duration {vd:.1} s differs from the trigger span {span:.1} s by more than 1%: check that this is the right video and trigger line."));
     }
-    if !p.contiguous {
+    if !contiguous {
         issues.push("The recording's sample numbers have gaps (dropped samples), so frames near them may be off.".into());
     }
-    let outside = fr.iter().filter(|r| **r < 0 || **r >= p.n_samples as i64).count();
+    let outside = fr.iter().filter(|r| **r < 0 || **r >= n_samples as i64).count();
     if outside > 0 {
         issues.push(format!("{outside} frame trigger(s) fall outside the recorded samples."));
     }
