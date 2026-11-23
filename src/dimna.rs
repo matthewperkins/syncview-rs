@@ -95,7 +95,6 @@ pub struct Dimna {
     /// What each TTL line carries, line 1 first ("" = not named).
     #[allow(dead_code)] // for picking the camera line (not yet used)
     pub line_names: Vec<String>,
-    #[allow(dead_code)] // for marks on the time axis (not yet shown)
     pub events: Vec<Event>,
     runs: Vec<Run>,
     /// Board sample numbers of the rising edges, per line (1..=8).

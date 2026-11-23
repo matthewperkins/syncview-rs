@@ -213,6 +213,12 @@ filters, references, the cache, video sync, annotations, portable sessions, spik
   recordings don't take over its annotations and cache;
 - `~/dimna-recordings` itself: the start page lists the sessions.
 
+**Notes from the recording.** What `events.tsv` holds besides start and stop is marked on the time
+axes: notes typed during the recording as amber triangles, settings changes (e.g. "lower bandwidth
+300 Hz") as grey-blue ones, each with a faint line through the chart and a triangle along the top
+of the overview strip. Hover a triangle for its text; click one on the chart's time axis to put the
+cursor there. They are read-only: syncview's own annotations are separate.
+
 `syncview_annotations.csv` goes into the session folder, beside `ephys/` and `video/` (into the
 recording folder for a recording made without the session layout). TTL line *k* is bit *k − 1* of
 the input word, as in Open Ephys (`--trigger-line`, default 1).

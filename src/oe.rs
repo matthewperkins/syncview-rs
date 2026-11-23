@@ -117,6 +117,17 @@ impl Recording {
         }
     }
 
+    /// The recording's notes and settings changes (Dimna; none for the other kinds). The start
+    /// and stop events are left out: they are the recording's ends.
+    pub fn notes(&self) -> Vec<Note> {
+        let Source::Dimna { d, .. } = &self.src else { return vec![] };
+        d.events
+            .iter()
+            .filter(|e| e.kind != "start" && e.kind != "stop")
+            .map(|e| Note { t: d.row_of(e.sample) as f64 / self.fs, kind: e.kind.clone(), text: e.text.clone() })
+            .collect()
+    }
+
     /// A portable session (no raw data: nothing can be filtered).
     pub fn is_portable(&self) -> bool {
         matches!(self.src, Source::Portable(_))
@@ -355,6 +366,15 @@ impl Recording {
         }
         self.cont().bit_volts(ch)
     }
+}
+
+/// Something the acquisition program wrote down during the recording (Dimna's events.tsv: notes
+/// typed while recording, settings changes), at a time in seconds from the first row.
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub t: f64,
+    pub kind: String,
+    pub text: String,
 }
 
 pub struct SyncInfo {

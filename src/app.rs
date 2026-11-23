@@ -195,6 +195,8 @@ pub struct App {
     /// Annotation labels (from the preset) and this recording's annotated events.
     labels: Vec<preset::Label>,
     ann: Annotations,
+    /// The acquisition program's notes and settings changes, marked on the time axes.
+    rec_notes: Vec<crate::oe::Note>,
     /// Intervals started but not yet ended (label, where it started): one per label at most, so
     /// bites can be marked inside an open chewing bout.
     open_marks: Vec<(String, Mark)>,
@@ -682,6 +684,7 @@ impl App {
                 },
             ),
             save_error: None,
+            rec_notes: rec.notes(),
             rec,
             cache,
         };
@@ -2419,6 +2422,7 @@ impl App {
                 (format!("{cmd} + scroll over a row"), "scale that row"),
                 ("double-click a row".into(), "reset its scale"),
                 ("click / drag the overview strip".into(), "jump there"),
+                ("click a note's marker (time axis)".into(), "go to that Dimna note"),
             ]),
             ("Window", vec![
                 ("|  or  F2".into(), "hide / show the sidebar"),
@@ -3051,6 +3055,29 @@ impl App {
                 k += 1;
             }
         }
+        // the acquisition program's notes: a faint line through the chart and a marker on the time
+        // axis; hovering the marker shows the note, clicking it puts the cursor there
+        let pointer = ui.ctx().pointer_hover_pos().filter(|_| pointer_in);
+        let mut hovered: Option<&crate::oe::Note> = None;
+        for nt in self.rec_notes.iter().filter(|nt| nt.t >= t_lo && nt.t <= t_hi) {
+            let x = tx_abs(nt.t);
+            let c = note_color(&nt.kind);
+            ev_painter.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], Stroke::new(1.0, c.gamma_multiply(0.4)));
+            fg_painter.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 5.0, bottom + 1.0), Pos2::new(x + 5.0, bottom + 1.0), Pos2::new(x, bottom + 9.0)], c, Stroke::NONE));
+            if pointer.is_some_and(|p| (p.x - x).abs() <= 6.0 && p.y >= bottom - 8.0 && p.y <= bottom + TAXIS_H) {
+                hovered = Some(nt);
+            }
+        }
+        if let Some(nt) = hovered {
+            let t_note = nt.t;
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if let Some(p) = pointer {
+                note_popup(ui.ctx(), p, note_text(nt));
+            }
+            if resp.clicked() {
+                self.set_time(t_note);
+            }
+        }
         // on-demand processing of the visible window for rows that aren't cached yet
         if !need_window.is_empty() {
             self.window_worker.request(need_window, t_lo - span, t_hi + span, &self.cache);
@@ -3144,6 +3171,19 @@ impl App {
         for e in self.ann.events.iter().filter(|e| self.shows(e)) {
             let (a, b) = (tx(e.start_s), tx(e.end_s).max(tx(e.start_s) + 1.5));
             p.rect_filled(Rect::from_min_max(Pos2::new(a, bottom - 7.0), Pos2::new(b, bottom - 1.0)), 0.0, self.label_color(&e.label));
+        }
+        // the acquisition program's notes along the top of the strip
+        let pointer = resp.hover_pos();
+        let mut hovered = None;
+        for nt in &self.rec_notes {
+            let x = tx(nt.t);
+            p.add(egui::Shape::convex_polygon(vec![Pos2::new(x - 4.0, top), Pos2::new(x + 4.0, top), Pos2::new(x, top + 7.0)], note_color(&nt.kind), Stroke::NONE));
+            if pointer.is_some_and(|q| (q.x - x).abs() <= 5.0 && q.y <= top + 10.0) {
+                hovered = Some(nt);
+            }
+        }
+        if let (Some(nt), Some(q)) = (hovered, pointer) {
+            note_popup(ui.ctx(), q, note_text(nt));
         }
         let (major, _) = nice_spacing(dur, ((x1 - x0) as f64 / 110.0).floor().max(3.0));
         let mut k = 1;
@@ -3751,4 +3791,38 @@ fn show_in_folder(p: &std::path::Path) {
     if let Err(e) = r {
         eprintln!("syncview: couldn't open the file manager: {e}");
     }
+}
+
+/// A note's marker colour: typed notes amber, settings changes grey-blue.
+fn note_color(kind: &str) -> Color32 {
+    match kind {
+        "note" => Color32::from_rgb(0xf0, 0xc0, 0x40),
+        "settings" => Color32::from_rgb(0x8a, 0x9c, 0xb4),
+        _ => FG,
+    }
+}
+
+/// A note's hover text: what, when, and the text.
+fn note_text(nt: &crate::oe::Note) -> String {
+    let what = match nt.kind.as_str() {
+        "note" => "Note".to_string(),
+        "settings" => "Settings changed".to_string(),
+        k => k.to_string(),
+    };
+    if nt.text.is_empty() { format!("{what} at {}", fmt_time(nt.t, None)) } else { format!("{what} at {}\n{}", fmt_time(nt.t, None), nt.text) }
+}
+
+/// A note's text in a small box above and right of the pointer.
+fn note_popup(ctx: &egui::Context, at: Pos2, text: String) {
+    egui::Area::new(egui::Id::new("note_popup"))
+        .order(egui::Order::Tooltip)
+        .pivot(Align2::LEFT_BOTTOM)
+        .fixed_pos(at + Vec2::new(12.0, -10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(egui::RichText::new(text).color(LABEL));
+            });
+        });
 }
