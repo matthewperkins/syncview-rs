@@ -41,7 +41,7 @@ use std::sync::Arc;
 /// Keys: ←/→ one video frame (Shift: 10 % of the view), PgUp/PgDn one view, Home/End, Space play,
 /// [ / ] playback speed, +/- zoom.
 #[derive(Parser)]
-#[command(version, verbatim_doc_comment)]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("SYNCVIEW_COMMIT"), ")"), verbatim_doc_comment)]
 struct Cli {
     /// a folder holding an Open Ephys recording, and optionally one video and one preset JSON (e.g.
     /// a shared sample); they are found and opened together. --video / --preset override. If it

@@ -2422,7 +2422,7 @@ impl App {
                 (format!("{cmd} + scroll over a row"), "scale that row"),
                 ("double-click a row".into(), "reset its scale"),
                 ("click / drag the overview strip".into(), "jump there"),
-                ("click a note's marker (time axis)".into(), "go to that Dimna note"),
+                ("click a note marker".into(), "go to that note"),
             ]),
             ("Window", vec![
                 ("|  or  F2".into(), "hide / show the sidebar"),
@@ -2457,12 +2457,12 @@ impl App {
                 ui.label(egui::RichText::new("Keys and mouse").size(17.0).color(LABEL));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new("? or Esc closes").small().color(MUTED));
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new(format!("syncview {} · commit {}", env!("CARGO_PKG_VERSION"), env!("SYNCVIEW_COMMIT"))).small().monospace().color(MUTED))
+                        .on_hover_text("the version and git commit this build was made from");
                 });
             });
             ui.add_space(6.0);
-            self.session_ui(ui);
-            ui.separator();
-            ui.add_space(4.0);
             ui.columns(2, |cols| {
                 for (k, (title, rows)) in sections.iter().enumerate() {
                     let ui = &mut cols[if k < 2 { 0 } else { 1 }];
@@ -2488,6 +2488,9 @@ impl App {
                     });
                 }
             });
+            ui.separator();
+            ui.add_space(4.0);
+            self.session_ui(ui);
         });
         if modal.should_close() {
             self.help = false;
