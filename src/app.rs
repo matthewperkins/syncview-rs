@@ -35,6 +35,8 @@ const TAXIS_H: f32 = 20.0;
 pub struct Options {
     pub preset: Preset,
     pub videos: Vec<PathBuf>,
+    /// The preset file loaded at the start (None: built from the recording).
+    pub preset_path: Option<PathBuf>,
     pub trigger_line: i64,
     pub start_time: Option<f64>,
     pub time_base: Option<f64>,
@@ -212,6 +214,10 @@ pub struct App {
     list_scroll: bool,
     /// The key reference (?) is showing.
     help: bool,
+    /// The preset file last loaded or saved (None: built from the recording).
+    preset_path: Option<PathBuf>,
+    /// The window title last sent (it names the recording and the videos).
+    window_title: String,
     /// The portable-session export window.
     portable: PortableUi,
     /// The chart's width in physical pixels, last frame (for the portable export's exact-zoom note).
@@ -660,6 +666,8 @@ impl App {
             audit: false,
             primed: None,
             help: false,
+            preset_path: opts.preset_path.clone(),
+            window_title: String::new(),
             portable: PortableUi { open: false, level: 1, copy_videos: false, sizes: vec![], missing: 0, run: None, msg: None },
             plot_px: 1500.0,
             spike_dirs,
@@ -1636,6 +1644,7 @@ impl App {
             Ok(p) => {
                 self.overview = None;
                 self.apply_preset(p);
+                self.preset_path = Some(path.clone());
                 self.status = format!("loaded preset {}", path.display());
             }
             Err(e) => self.dialogs.push(("Could not load preset".into(), format!("{}:\n\n{e:#}", path.display()))),
@@ -1658,7 +1667,10 @@ impl App {
         let res = serde_json::to_string_pretty(&self.preset()).map_err(anyhow::Error::from)
             .and_then(|t| std::fs::write(&path, t + "\n").map_err(anyhow::Error::from));
         match res {
-            Ok(()) => self.status = format!("saved preset {}", path.display()),
+            Ok(()) => {
+                self.status = format!("saved preset {}", path.display());
+                self.preset_path = Some(path);
+            }
             Err(e) => self.dialogs.push(("Could not save preset".into(), format!("{}:\n\n{e:#}", path.display()))),
         }
     }
@@ -2444,6 +2456,9 @@ impl App {
                 });
             });
             ui.add_space(6.0);
+            self.session_ui(ui);
+            ui.separator();
+            ui.add_space(4.0);
             ui.columns(2, |cols| {
                 for (k, (title, rows)) in sections.iter().enumerate() {
                     let ui = &mut cols[if k < 2 { 0 } else { 1 }];
@@ -2473,6 +2488,83 @@ impl App {
         if modal.should_close() {
             self.help = false;
         }
+    }
+
+    /// Top of the key reference: which recording, videos, annotation file and preset these are,
+    /// with their full paths.
+    fn session_ui(&self, ui: &mut egui::Ui) {
+        use egui::RichText;
+        let path_row = |ui: &mut egui::Ui, p: &std::path::Path| {
+            ui.horizontal(|ui| {
+                let text = p.display().to_string();
+                if ui.small_button("Copy").on_hover_text("copy the path").clicked() {
+                    ui.ctx().copy_text(text.clone());
+                }
+                if ui.small_button("Show").on_hover_text("show it in the file manager").clicked() {
+                    show_in_folder(p);
+                }
+                ui.add(egui::Label::new(RichText::new(text).monospace().size(11.5).color(FG)).wrap());
+            });
+        };
+        let head = |ui: &mut egui::Ui, s: &str| {
+            ui.label(RichText::new(s).color(MUTED));
+        };
+        ui.label(RichText::new("This session").color(LABEL).strong());
+        let rec = &self.rec;
+        egui::Grid::new("session_paths").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+            head(ui, "Recording");
+            ui.vertical(|ui| {
+                let name = crate::shell::recording_name(rec);
+                let name = if name.starts_with(rec.kind().split(' ').next().unwrap_or_default()) { name } else { format!("{}  ·  {name}", rec.kind()) };
+                let mut about = vec![name, crate::shell::fmt_length(rec.duration()), format!("{} ch @ {} kHz", rec.ch_names.len(), rec.fs / 1000.0)];
+                if let Some(s) = rec.started() {
+                    about.push(format!("started {s}"));
+                }
+                ui.label(RichText::new(about.join("  ·  ")).color(FG));
+                if rec.is_portable() {
+                    path_row(ui, &rec.home);
+                    ui.label(RichText::new("exported from").small().color(MUTED));
+                }
+                path_row(ui, &rec.rec_dir);
+            });
+            ui.end_row();
+            if self.cams.is_empty() {
+                head(ui, "Video");
+                ui.label(RichText::new("none").color(MUTED));
+                ui.end_row();
+            }
+            for (k, c) in self.cams.iter().enumerate() {
+                head(ui, &if self.cams.len() > 1 { format!("Video {}", k + 1) } else { "Video".into() });
+                ui.vertical(|ui| {
+                    let frames = c.opened.as_ref().map_or("opening…".to_string(), |o| format!("{} frames", o.0));
+                    ui.label(RichText::new(format!("{frames}  ·  TTL line {}", c.line)).color(FG));
+                    path_row(ui, &c.dec.path);
+                });
+                ui.end_row();
+            }
+            head(ui, "Annotations");
+            ui.vertical(|ui| {
+                let n = self.ann.events.len();
+                let state = if self.ann.load_error.is_some() {
+                    "can't be read: nothing will be saved over it".to_string()
+                } else if self.ann.path.exists() {
+                    format!("{n} event{}", if n == 1 { "" } else { "s" })
+                } else {
+                    "no file yet (it's made with the first event)".to_string()
+                };
+                ui.label(RichText::new(state).color(FG));
+                path_row(ui, &self.ann.path);
+            });
+            ui.end_row();
+            head(ui, "Preset");
+            match &self.preset_path {
+                Some(p) => path_row(ui, p),
+                None => {
+                    ui.label(RichText::new("none loaded: rows built from the recording").color(MUTED));
+                }
+            }
+            ui.end_row();
+        });
     }
 
     /// Under the toolbar: every label with its key and colour; an open interval's chip is lit and
@@ -3451,6 +3543,12 @@ impl App {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let videos: Vec<PathBuf> = self.cams.iter().map(|c| c.dec.path.clone()).collect();
+        let title = crate::shell::title(&self.rec, &videos);
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
         if self.spikes_scanned.elapsed().as_secs_f64() > 5.0 {
             self.spikes_scanned = Instant::now();
             let found = crate::spikes::find(&self.rec.home);
@@ -3637,5 +3735,20 @@ mod tests {
         assert!(v["channels"][1].get("ref").is_none());
         let back: Preset = serde_json::from_value(v).unwrap();
         assert_eq!(back.channels, p.channels);
+    }
+}
+
+/// Show a file or folder in the system's file manager (selected, where the system can).
+fn show_in_folder(p: &std::path::Path) {
+    let r = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg("-R").arg(p).spawn()
+    } else if cfg!(windows) {
+        std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn()
+    } else {
+        let dir = if p.is_dir() { p } else { p.parent().unwrap_or(p) };
+        std::process::Command::new("xdg-open").arg(dir).spawn()
+    };
+    if let Err(e) = r {
+        eprintln!("syncview: couldn't open the file manager: {e}");
     }
 }

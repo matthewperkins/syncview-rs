@@ -98,6 +98,25 @@ impl Recording {
         Ok(s)
     }
 
+    /// What kind of recording this is, in words.
+    pub fn kind(&self) -> &'static str {
+        match &self.src {
+            Source::Portable(_) => "portable session",
+            Source::Dimna { .. } => "Dimna",
+            Source::OpenEphys { .. } if self.rec_dir.extension().is_some_and(|e| e.eq_ignore_ascii_case("nwb")) => "Open Ephys (NWB)",
+            Source::OpenEphys { .. } => "Open Ephys",
+        }
+    }
+
+    /// When the recording started (local time, to the minute), if it says.
+    pub fn started(&self) -> Option<String> {
+        match &self.src {
+            Source::OpenEphys { rec, .. } => rec.sync_messages().ok().flatten().and_then(|m| m.software_time_ms).map(crate::splash::local_time),
+            Source::Dimna { d, .. } => d.created.as_ref().map(|c| c.get(..16).unwrap_or(c).replace('T', " ")),
+            Source::Portable(_) => None,
+        }
+    }
+
     /// A portable session (no raw data: nothing can be filtered).
     pub fn is_portable(&self) -> bool {
         matches!(self.src, Source::Portable(_))

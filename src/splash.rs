@@ -169,7 +169,7 @@ fn alignment_warning(rec: &Path, frames: usize, video_path: &Path, stream: Optio
 
 /// Milliseconds since 1970 as a local date and time (to the minute), like the session folder
 /// names the GUI makes. UTC where the local time zone isn't available.
-fn local_time(ms: i64) -> String {
+pub(crate) fn local_time(ms: i64) -> String {
     #[cfg(unix)]
     {
         let t = ms.div_euclid(1000) as libc::time_t;

@@ -6,7 +6,7 @@ use crate::splash::{Launch, Splash};
 use crate::{cache, oe, preset};
 use anyhow::{Context, Result};
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,14 +41,52 @@ pub struct Shell {
     shot_requested: bool,
 }
 
-pub fn title(rec: &oe::Recording) -> String {
-    format!(
-        "syncview — {}/{}  ({:.2} h, {} Hz)",
-        rec.rec_dir.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy(),
-        rec.rec_dir.file_name().unwrap_or_default().to_string_lossy(),
-        rec.duration() / 3600.0,
-        rec.fs
-    )
+/// The recording in a few words: the session folder's name, then the recording within it.
+/// Open Ephys `…/2026-11-05_15-18-16/Record Node 101/experiment2/recording1` is
+/// "2026-11-05_15-18-16 · exp2/rec1"; a Dimna session "Dimna 2026-11-21_05-34-59".
+pub fn recording_name(rec: &oe::Recording) -> String {
+    let name = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let dir = &rec.rec_dir;
+    let base = if rec.dimna().is_some() {
+        format!("Dimna {}", name(&crate::dimna::session_of(dir).unwrap_or_else(|| dir.clone())))
+    } else if let Some(node) = dir.ancestors().find(|a| name(a).starts_with("Record Node")) {
+        let within: Vec<String> = dir
+            .strip_prefix(node)
+            .unwrap_or(dir)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().replace("experiment", "exp").replace("recording", "rec"))
+            .collect();
+        format!("{} · {}", node.parent().map(name).unwrap_or_default(), within.join("/"))
+    } else {
+        format!("{}/{}", dir.parent().map(name).unwrap_or_default(), name(dir))
+    };
+    if rec.is_portable() { format!("portable · {base}") } else { base }
+}
+
+/// "10 s", "12 min", "2 h 15 min".
+pub fn fmt_length(s: f64) -> String {
+    let m = (s / 60.0).round() as i64;
+    if s < 60.0 {
+        format!("{s:.0} s")
+    } else if m < 60 {
+        format!("{m} min")
+    } else {
+        format!("{} h {:02} min", m / 60, m % 60)
+    }
+}
+
+/// The window title: the recording, the first video (and how many more), the length.
+pub fn title(rec: &oe::Recording, videos: &[PathBuf]) -> String {
+    let mut parts = vec![recording_name(rec)];
+    if let Some(v) = videos.first() {
+        let mut n = v.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if n.chars().count() > 40 {
+            n = n.chars().take(39).collect::<String>() + "…";
+        }
+        parts.push(if videos.len() > 1 { format!("{n} +{}", videos.len() - 1) } else { n });
+    }
+    parts.push(fmt_length(rec.duration()));
+    format!("syncview — {}", parts.join(" · "))
 }
 
 pub fn load_preset(path: &Option<PathBuf>, rec: &oe::Recording) -> Result<preset::Preset> {
@@ -110,10 +148,10 @@ impl Shell {
         let cache = Arc::new(cache::TraceCache::new(rec.clone(), self.settings.cache_root.clone())?);
         let preset = load_preset(&l.preset, &rec)?;
         eprintln!("syncview: recording {}", rec.rec_dir.display());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title(&rec)));
         let opts = app::Options {
             preset,
             videos: l.videos.clone(),
+            preset_path: l.preset.clone(),
             trigger_line: self.settings.trigger_line,
             start_time: l.time,
             time_base: self.settings.time_base,
